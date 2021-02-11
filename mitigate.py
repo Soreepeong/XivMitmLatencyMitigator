@@ -100,7 +100,7 @@ class XivMessageIpcActorControl(StructBase, definition="<H2sIIII4s"):
     unknown_2: bytes  # 4s: char x 4
 
 
-class XivMessageIpcActorControlSelf(StructBase, definition="H2sIIIIII4s"):
+class XivMessageIpcActorControlSelf(StructBase, definition="<H2sIIIIII4s"):
     CATEGORY_ROLLBACK: typing.ClassVar = 0x02bc
 
     category: int  # H: uint16
@@ -114,7 +114,7 @@ class XivMessageIpcActorControlSelf(StructBase, definition="H2sIIIIII4s"):
     unknown_2: bytes  # 4s: char x 4
 
 
-class XivMessageIpcActorCast(StructBase, definition="HB1sH2sfIf4sHHH2s"):
+class XivMessageIpcActorCast(StructBase, definition="<HB1sH2sfIf4sHHH2s"):
     action_id: int  # H: uint16
     skill_type: int  # B: uint8
     unknown_1: bytes  # 1s: char x 1
