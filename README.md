@@ -3,7 +3,7 @@ Double weave for everyone, including PC, Mac, and PS4 users. No more being force
 
 If you're running a custom VPN server on linux, just run the script as root, and you're good to go.
 
-If you're running Windows, you can use [XivAlexander addon](https://github.com/Soreepeong/XivAlexander) instead. Do **not** stack both solutions. 
+If you're running Windows, you can use [XivAlexander addon](https://github.com/Soreepeong/XivAlexander) instead. You can use both solutions at the same time, in which case, XivAlexander will take precedence. 
 
 ## How to use
 1. If you have a linux machine running in same network, skip to 5.
