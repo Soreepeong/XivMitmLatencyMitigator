@@ -1,8 +1,10 @@
 #!/usr/bin/sudo python
 
 import collections
+import dataclasses
 import datetime
 import ipaddress
+import math
 import os
 import random
 import socket
@@ -13,6 +15,8 @@ import typing
 import zlib
 
 ACTION_ID_AUTO_ATTACK = 0x0007
+ACTION_ID_AUTO_ATTACK_MCH = 0x0008
+AUTO_ATTACK_DELAY = 0.1
 SO_ORIGINAL_DST = 80
 
 # Server responses have been usually taking between 50ms and 100ms on below-1ms
@@ -78,7 +82,7 @@ class XivMessageIpcActionEffect(StructBase, definition="<I4sIIfIHHHBB1sB2s"):
     global_effect_counter: int  # I: uint32
     animation_lock_duration: float  # f: float
     unknown_target_id: int  # I: uint32
-    hide_animation: int  # H: uint16
+    source_sequence: int  # H: uint16
     rotation: int  # H: uint16
     action_animation_id: int  # H: uint16
     variation: int  # B: uint8
@@ -128,6 +132,19 @@ class XivMessageIpcActorCast(StructBase, definition="<HB1sH2sfIf4sHHH2s"):
     y: int  # H: uint16
     z: int  # H: uint16
     unknown_4: bytes  # 2s: char x 2
+
+
+class XivMessageIpcActionRequest(StructBase, definition="<1sB2sIH6sQHH4s"):
+    pad_0000: bytes  # 1s: char x 1
+    type: int  # B: uint8
+    pad_0002: bytes  # 2s: char x 2
+    action_id: int  # I: uint32
+    sequence: int  # H: uint16
+    pad_000c: bytes  # 6s: char x 6
+    target_id: int  # Q: uint64
+    item_source_slot: int  # H: uint16
+    item_source_container: int  # H: uint16
+    unknown: bytes  # 4s: char x 4
 
 
 class XivMessageIpc(StructBase, definition="<HH2sHI4s"):
@@ -269,10 +286,17 @@ class XivBundle(StructBase, definition="<16sQH2sHHBB6s"):
         return b""
 
 
-class Connection:
-    CAST_SENTINEL = None
+@dataclasses.dataclass
+class PendingAction:
+    action_id: int
+    sequence: int
+    request_timestamp: float = dataclasses.field(default_factory=time.time)
+    is_cast: bool = False
 
+
+class Connection:
     all_connections: typing.ClassVar["Connection"] = list()
+    pending_actions: typing.Deque[PendingAction] = collections.deque()
 
     def __init__(self, sock: socket.socket, source: typing.Tuple[str, int]):
         self.source = source
@@ -285,7 +309,6 @@ class Connection:
 
         self.broken_event = threading.Event()
 
-        self.pending_action_request_timestamps = collections.deque()
         self.last_animation_lock_ends_at = 0
 
         self.is_game_connection = True
@@ -365,11 +388,11 @@ class Connection:
                 if ipc.type != XivMessageIpc.TYPE_INTERESTED:
                     continue
                 if ipc.subtype == self.SUBTYPE_REQUEST_ACTION:
-                    self.pending_action_request_timestamps.append(time.time())
-                    if len(self.pending_action_request_timestamps) == 1:
-                        self.last_animation_lock_ends_at = self.pending_action_request_timestamps[-1]
-                    action_id, = struct.unpack("I", ipc.data[4:8])
-                    self.log(f"Action request: action=0x{action_id:04x}")
+                    request = XivMessageIpcActionRequest(ipc.data, 0)
+                    self.pending_actions.append(PendingAction(request.action_id, request.sequence))
+                    if self.pending_actions[-1].request_timestamp > self.last_animation_lock_ends_at:
+                        self.last_animation_lock_ends_at = self.pending_actions[-1].request_timestamp
+                    self.log(f"C2S_ActionRequest: actionId={request.action_id:04x} sequence={request.sequence:04x}")
             except (InvalidDataException, IncompleteDataException):
                 continue
         return bundle
@@ -386,47 +409,81 @@ class Connection:
                     continue
                 if ipc.subtype in self.SUBTYPE_RESPONSE_ACTION_RESULT:
                     effect = XivMessageIpcActionEffect(ipc.data, 0)
-                    new_duration = effect.animation_lock_duration
+                    original_wait_time = effect.animation_lock_duration
+                    wait_time = effect.animation_lock_duration
+                    now = time.time()
 
-                    if self.pending_action_request_timestamps and effect.action_id != ACTION_ID_AUTO_ATTACK:
-                        if self.pending_action_request_timestamps[0] != Connection.CAST_SENTINEL:
-                            extra_delay = EXTRA_DELAY
-                            if extra_delay <= 7 * 0.01:
-                                # I told you to not decrease the value below 70ms.
-                                if random.randint(0, 9999) < 50:
-                                    # This is what you get for decreasing the value.
-                                    extra_delay = 5
-                            delay = max(0., extra_delay + new_duration)
-                            self.last_animation_lock_ends_at += delay
-                            new_duration = max(0., self.last_animation_lock_ends_at - time.time())
-                        self.pending_action_request_timestamps.popleft()
+                    if effect.source_sequence == 0:
+                        if effect.action_id in (ACTION_ID_AUTO_ATTACK, ACTION_ID_AUTO_ATTACK_MCH):
+                            if self.last_animation_lock_ends_at > now:
+                                # if animation lock is supposedly already in progress,
+                                # add the new value to previously in-progress animation lock, instead of replacing it.
+                                self.last_animation_lock_ends_at += AUTO_ATTACK_DELAY
+                                wait_time = self.last_animation_lock_ends_at - now
 
-                    self.log(f"Action response: action=0x{effect.action_id:04x} "
-                             f"delay={effect.animation_lock_duration:.3f} -> {new_duration:.3f}")
+                            else:
+                                # even if it wasn't, the server would consider other actions in progress when
+                                # calculating auto-attack delay, so we fix it to 100ms.
+                                wait_time = AUTO_ATTACK_DELAY
+                        else:
+                            self.log(f"\t┎ Not user-originated, and isn't an auto-attack ({effect.action_id:04x})")
 
-                    effect.animation_lock_duration = new_duration
+                    else:
+                        while self.pending_actions and self.pending_actions[0].sequence != effect.source_sequence:
+                            item = self.pending_actions.popleft()
+                            self.log(f"\t┎ ActionRequest ignored for processing: actionId={item.action_id:04x} "
+                                     f"sequence={item.sequence:04x}")
 
-                    effect_bytes = bytes(effect)
-                    ipc.data = effect_bytes + ipc.data[len(effect_bytes):]
-                    ipc_bytes = bytes(ipc)
-                    message.data = ipc_bytes + message.data[len(ipc_bytes):]
+                        if self.pending_actions:
+                            item = self.pending_actions.popleft()
+                            # 100ms animation lock after cast ends stays.
+                            # Modify animation lock duration for instant actions only.
+                            # Since no other action is in progress right before the cast ends,
+                            # we can safely replace the animation lock with the latest after-cast lock.
+                            if not item.is_cast:
+                                self.last_animation_lock_ends_at += original_wait_time + EXTRA_DELAY
+                                wait_time = self.last_animation_lock_ends_at - now
+
+                    if math.isclose(wait_time, original_wait_time):
+                        self.log(f"S2C_ActionEffect: actionId={effect.action_id:04x} "
+                                 f"sourceSequence={effect.source_sequence:04x} "
+                                 f"wait={int(original_wait_time * 1000)}ms")
+                    else:
+                        self.log(f"S2C_ActionEffect: actionId={effect.action_id:04x} "
+                                 f"sourceSequence={effect.source_sequence:04x} "
+                                 f"wait={int(original_wait_time * 1000)}ms->{int(wait_time * 1000)}ms")
+                        effect.animation_lock_duration = wait_time
+                        effect_bytes = bytes(effect)
+                        ipc.data = effect_bytes + ipc.data[len(effect_bytes):]
+                        ipc_bytes = bytes(ipc)
+                        message.data = ipc_bytes + message.data[len(ipc_bytes):]
 
                 elif ipc.subtype == self.SUBTYPE_RESPONSE_ACTOR_CONTROL_SELF:
                     control = XivMessageIpcActorControlSelf(ipc.data, 0)
                     if control.category == XivMessageIpcActorControlSelf.CATEGORY_ROLLBACK:
 
-                        if self.pending_action_request_timestamps:
-                            self.pending_action_request_timestamps.popleft()
+                        if self.pending_actions:
+                            self.pending_actions.popleft()
 
-                        self.log(f"Action rollback: action=0x{control.param_3:04x}")
+                        self.log(f"S2C_ActorControlSelf/ActionRejected: "
+                                 f"p1={control.param_1:08x} "
+                                 f"p2={control.param_2:08x} "
+                                 f"actionId={control.param_3:04x}"
+                                 f"p4={control.param_4:08x} "
+                                 f"p5={control.param_5:08x} "
+                                 f"p6={control.param_6:08x} ")
 
                 elif ipc.subtype == self.SUBTYPE_RESPONSE_ACTOR_CONTROL:
                     control = XivMessageIpcActorControl(ipc.data, 0)
                     if control.category == XivMessageIpcActorControl.CATEGORY_CANCEL_CAST:
-                        if self.pending_action_request_timestamps:
-                            self.pending_action_request_timestamps.popleft()
+                        if self.pending_actions:
+                            self.pending_actions.popleft()
 
-                        self.log(f"Cast cancel: action=0x{control.param_3:04x}")
+                        self.log(f"S2C_ActorControl/CancelCast: "
+                                 f"p1={control.param_1:08x} "
+                                 f"action={control.param_2:04x}"
+                                 f"p3={control.param_3:08x} "
+                                 f"p4={control.param_4:08x} ")
 
                 elif ipc.subtype == self.SUBTYPE_RESPONSE_ACTOR_CAST:
                     cast = XivMessageIpcActorCast(ipc.data, 0)
@@ -434,10 +491,12 @@ class Connection:
                     # Mark that the last request was a cast.
                     # If it indeed is a cast, the game UI will block the user from generating additional requests,
                     # so first item is guaranteed to be the cast action.
-                    if self.pending_action_request_timestamps:
-                        self.pending_action_request_timestamps[0] = Connection.CAST_SENTINEL
+                    if self.pending_actions:
+                        self.pending_actions[0].is_cast = True
 
-                    self.log(f"Cast: action=0x{cast.action_id:04x}")
+                    self.log(f"S2C_ActorCast: actionId={cast.action_id:04x} type={cast.skill_type:04x} "
+                             f"action_id_2={cast.action_id_2:04x} time={cast.cast_time:.3f} "
+                             f"target_id={cast.target_id:08x}")
 
             except (InvalidDataException, IncompleteDataException):
                 continue
