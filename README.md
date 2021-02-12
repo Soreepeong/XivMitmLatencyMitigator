@@ -59,14 +59,14 @@ If you're running Windows, you can use [XivAlexander addon](https://github.com/S
      route add 204.2.229.0 mask 255.255.255.0 <vm_ip>
      route add 124.150.157.0 mask 255.255.255.0 <vm_ip>
      route add 183.111.189.0 mask 255.255.255.0 <vm_ip>
-     route add 195.82.50.9 mask 255.255.255.0 <vm_ip>
+     route add 195.82.50.0 mask 255.255.255.0 <vm_ip>
      ```
    * **Mac**: Run a `Terminal`, and the run the following.
      ```
      sudo route -n add -net 204.2.229.0/24 <vm_ip>
      sudo route -n add -net 124.150.157.0/24 <vm_ip>
      sudo route -n add -net 183.111.189.0/24 <vm_ip>
-     sudo route -n add -net 195.82.50.9/24 <vm_ip>
+     sudo route -n add -net 195.82.50.0/24 <vm_ip>
      ```
    * **PS4**: Set up Static IP ([Guide](https://www.linksys.com/gb/support-article?articleNum=216429)), but use `<vm_ip>` instead for `Default Gateway`.
 9. Run the game and see things get printed in the virtual machine, and if it does, it's working.
