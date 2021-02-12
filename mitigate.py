@@ -421,8 +421,16 @@ class Connection:
                 if ipc.subtype == self.SUBTYPE_REQUEST_ACTION:
                     request = XivMessageIpcActionRequest(ipc.data, 0)
                     self.pending_actions.append(PendingAction(request.action_id, request.sequence))
+
+                    # If somehow latest action request has been made before last animation lock end time, keep it.
+                    # Otherwise...
                     if self.pending_actions[-1].request_timestamp > self.last_animation_lock_ends_at:
-                        self.last_animation_lock_ends_at = self.pending_actions[-1].request_timestamp
+
+                        # If there was no action queued to begin with before the current one,
+                        # update the base lock time to now.
+                        if len(self.pending_actions) == 1:
+                            self.last_animation_lock_ends_at = self.pending_actions[-1].request_timestamp
+
                     self.log(f"C2S_ActionRequest: actionId={request.action_id:04x} sequence={request.sequence:04x}")
             except (InvalidDataException, IncompleteDataException):
                 continue
