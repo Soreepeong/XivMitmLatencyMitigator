@@ -147,8 +147,22 @@ class XivMessageIpcActionRequest(StructBase, definition="<1sB2sIH6sQHH4s"):
     unknown: bytes  # 4s: char x 4
 
 
+class XivMessageIpcCustomOriginalWaitTime(StructBase, definition="<H2sf"):
+    source_sequence: int  # H: uint16
+    padding1: bytes  # 2s: char x 2
+    original_wait_time: float  # f: float
+
+    @classmethod
+    def make(cls, source_sequence: int, original_wait_time: float):
+        return XivMessageIpcCustomOriginalWaitTime(cls.DEFINITION.pack(source_sequence, b"\x00\x00",
+                                                                       original_wait_time), 0)
+
+
 class XivMessageIpc(StructBase, definition="<HH2sHI4s"):
     TYPE_INTERESTED: typing.ClassVar = 0x14  # not interested in anything else at the moment, hence the meaningless name
+    TYPE_CUSTOM: typing.ClassVar = 0xE852
+
+    SUBTYPE_CUSTOM_ORIGINAL_WAIT_TIME = 0x0000
 
     type: int  # H: uint16
     subtype: int  # H: uint16
@@ -162,6 +176,12 @@ class XivMessageIpc(StructBase, definition="<HH2sHI4s"):
         super().__init__(data, offset)
 
         self.data = data[offset + self.__class__.DEFINITION.size:]
+
+    @classmethod
+    def make(cls, type_: int, subtype: int, server_id: int, epoch: int,
+             data: typing.Union[bytes, bytearray, StructBase]):
+        return XivMessageIpc(cls.DEFINITION.pack(type_, subtype, b"\0\0", server_id, epoch, b"\0\0\0\0") + bytes(data),
+                             0)
 
     def __bytes__(self):
         return super().__bytes__() + self.data
@@ -185,6 +205,16 @@ class XivMessage(StructBase, definition="<IIIH2s"):
             raise IncompleteDataException
 
         self.data = data[offset + self.__class__.DEFINITION.size:offset + self.length]
+
+    @classmethod
+    def make(cls, source_actor: int, target_actor: int, segment_type: int,
+             data: typing.Union[bytearray, StructBase]):
+        data_bytes = bytes(data)
+        return XivMessage(cls.DEFINITION.pack(cls.DEFINITION.size + len(data_bytes),
+                                              source_actor,
+                                              target_actor,
+                                              segment_type,
+                                              b"\x00\x00") + data_bytes, 0)
 
     def __bytes__(self):
         res = super().__bytes__() + self.data
@@ -243,6 +273,7 @@ class XivBundle(StructBase, definition="<16sQH2sHHBB6s"):
         if self.zlib_compressed:
             data = zlib.compress(data)
         self.length = self.__class__.DEFINITION.size + len(data)
+        self.message_count = len(self.messages)
         res = super().__bytes__() + data
         return res
 
@@ -398,19 +429,25 @@ class Connection:
         return bundle
 
     def destination_to_source(self, bundle: XivBundle):
-        for message in bundle.messages:
+        message_insertions: typing.List[typing.Tuple[int, XivMessage]] = []
+        wait_time_dict: typing.Dict[int, float] = {}
+        for i, message in enumerate(bundle.messages):
             if not message.segment_type == XivMessage.SEGMENT_TYPE_IPC:
                 continue
             if message.source_actor != message.target_actor:
                 continue
             try:
                 ipc = XivMessageIpc(message.data, 0)
+                if (ipc.type == XivMessageIpc.TYPE_CUSTOM
+                        and ipc.subtype == XivMessageIpc.SUBTYPE_CUSTOM_ORIGINAL_WAIT_TIME):
+                    data = XivMessageIpcCustomOriginalWaitTime(message.data, 0)
+                    wait_time_dict[data.source_sequence] = data.original_wait_time
                 if ipc.type != XivMessageIpc.TYPE_INTERESTED:
                     continue
                 if ipc.subtype in self.SUBTYPE_RESPONSE_ACTION_RESULT:
                     effect = XivMessageIpcActionEffect(ipc.data, 0)
-                    original_wait_time = effect.animation_lock_duration
-                    wait_time = effect.animation_lock_duration
+                    original_wait_time = wait_time_dict.get(effect.source_sequence, effect.animation_lock_duration)
+                    wait_time = original_wait_time
                     now = time.time()
 
                     if effect.source_sequence == 0:
@@ -458,6 +495,17 @@ class Connection:
                         ipc_bytes = bytes(ipc)
                         message.data = ipc_bytes + message.data[len(ipc_bytes):]
 
+                        message_insertions.append((
+                            i, XivMessage.make(message.source_actor, message.target_actor,
+                                               XivMessage.SEGMENT_TYPE_IPC,
+                                               XivMessageIpc.make(
+                                                   XivMessageIpc.TYPE_CUSTOM,
+                                                   XivMessageIpc.SUBTYPE_CUSTOM_ORIGINAL_WAIT_TIME,
+                                                   ipc.server_id, ipc.epoch,
+                                                   XivMessageIpcCustomOriginalWaitTime.make(effect.source_sequence, original_wait_time)
+                                               ))
+                        ))
+
                 elif ipc.subtype == self.SUBTYPE_RESPONSE_ACTOR_CONTROL_SELF:
                     control = XivMessageIpcActorControlSelf(ipc.data, 0)
                     if control.category == XivMessageIpcActorControlSelf.CATEGORY_ROLLBACK:
@@ -500,6 +548,8 @@ class Connection:
 
             except (InvalidDataException, IncompleteDataException):
                 continue
+        for i, message in reversed(message_insertions):
+            bundle.messages.insert(i, message)
         return bundle
 
     def run(self):
