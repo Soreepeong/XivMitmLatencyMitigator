@@ -349,7 +349,7 @@ class Connection:
         if any(ipaddress.ip_address(self.destination[0]) in x for x in INTL_DATACENTER_IP_NETWORK):
             self.SUBTYPE_RESPONSE_ACTOR_CAST = 0x02b2
             self.SUBTYPE_RESPONSE_ACTOR_CONTROL = 0x00f0
-            self.SUBTYPE_RESPONSE_ACTOR_CONTROL_SELF = 0x017a
+            self.SUBTYPE_RESPONSE_ACTOR_CONTROL_SELF = 0x0350
             self.SUBTYPE_RESPONSE_ACTION_RESULT = [0x021f, 0x03df, 0x00ad, 0x0229, 0x0197]
 
             self.SUBTYPE_REQUEST_ACTION = 0x017a
