@@ -598,7 +598,8 @@ class Connection:
             text = " ".join(str(x) for x in ([datetime.datetime.now(), *msg]))
             print(f"[{self.conn_id}]", text)
             if self.log_fp:
-                self.log_fp.write(text)
+                self.log_fp.write(text + "\n")
+                self.log_fp.flush()
 
 
 def __main__() -> int:
@@ -624,7 +625,7 @@ def __main__() -> int:
         while True:
             try:
                 connection = Connection(*listener.accept())
-            except KeyboardInterrupt:
+            except KeyboardInterrupt as e:
                 break
             Connection.all_connections.append(connection)
             threading.Thread(target=connection.run).start()
