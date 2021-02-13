@@ -519,30 +519,37 @@ class Connection:
                 elif ipc.subtype == self.SUBTYPE_RESPONSE_ACTOR_CONTROL_SELF:
                     control = XivMessageIpcActorControlSelf(ipc.data, 0)
                     if control.category == XivMessageIpcActorControlSelf.CATEGORY_ROLLBACK:
-                        source_sequence = control.param_5
-                        while self.pending_actions and self.pending_actions[0].sequence != source_sequence:
+                        action_id = control.param_3
+                        source_sequence = control.param_6
+                        while (self.pending_actions
+                               and (
+                                       (source_sequence and self.pending_actions[0].sequence != source_sequence)
+                                       or (not source_sequence and self.pending_actions[0].action_id != action_id)
+                               )):
                             item = self.pending_actions.popleft()
                             self.log(f"\t┎ ActionRequest ignored for processing: actionId={item.action_id:04x} "
-                                     f"sequence={source_sequence:04x}")
+                                     f"sequence={item.sequence:04x}")
 
                         if self.pending_actions:
                             self.pending_actions.popleft()
 
                         self.log(f"S2C_ActorControlSelf/ActionRejected: "
-                                 f"actionId={control.param_2:04x}"
+                                 f"actionId={action_id:04x}"
                                  f"sourceSequence={source_sequence:08x}")
 
                 elif ipc.subtype == self.SUBTYPE_RESPONSE_ACTOR_CONTROL:
                     control = XivMessageIpcActorControl(ipc.data, 0)
                     if control.category == XivMessageIpcActorControl.CATEGORY_CANCEL_CAST:
+                        action_id = control.param_3
+                        while self.pending_actions and self.pending_actions[0].action_id != action_id:
+                            item = self.pending_actions.popleft()
+                            self.log(f"\t┎ ActionRequest ignored for processing: actionId={item.action_id:04x} "
+                                     f"sequence={item.sequence:04x}")
+
                         if self.pending_actions:
                             self.pending_actions.popleft()
 
-                        self.log(f"S2C_ActorControl/CancelCast: "
-                                 f"p1={control.param_1:08x} "
-                                 f"action={control.param_2:04x}"
-                                 f"p3={control.param_3:08x} "
-                                 f"p4={control.param_4:08x} ")
+                        self.log(f"S2C_ActorControl/CancelCast: actionId={action_id:04x}")
 
                 elif ipc.subtype == self.SUBTYPE_RESPONSE_ACTOR_CAST:
                     cast = XivMessageIpcActorCast(ipc.data, 0)
