@@ -534,7 +534,7 @@ class Connection:
                             self.pending_actions.popleft()
 
                         self.log(f"S2C_ActorControlSelf/ActionRejected: "
-                                 f"actionId={action_id:04x}"
+                                 f"actionId={action_id:04x} "
                                  f"sourceSequence={source_sequence:08x}")
 
                 elif ipc.subtype == self.SUBTYPE_RESPONSE_ACTOR_CONTROL:
