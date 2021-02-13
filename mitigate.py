@@ -566,7 +566,9 @@ class Connection:
     def run(self):
         self.remote.settimeout(3)
         threads = []
-        with open(f"/tmp/xmlm.{datetime.datetime.now():%Y%m%d%H%M%S}.{self.conn_id}.log", "w") as self.log_fp:
+        log_path = f"/tmp/xmlm.{datetime.datetime.now():%Y%m%d%H%M%S}.{self.conn_id}.log"
+        self.log("Log will be saved to", log_path)
+        with open(log_path, "w") as self.log_fp:
             try:
                 try:
                     self.remote.connect(self.destination)
