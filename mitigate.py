@@ -328,6 +328,7 @@ class PendingAction:
 class Connection:
     all_connections: typing.ClassVar["Connection"] = list()
     pending_actions: typing.Deque[PendingAction] = collections.deque()
+    log_fp: typing.Optional[typing.TextIO] = None
 
     def __init__(self, sock: socket.socket, source: typing.Tuple[str, int]):
         self.source = source
@@ -497,7 +498,7 @@ class Connection:
                         self.log(f"S2C_ActionEffect: actionId={effect.action_id:04x} "
                                  f"sourceSequence={effect.source_sequence:04x} "
                                  f"wait={int(original_wait_time * 1000)}ms->{int(wait_time * 1000)}ms")
-                        effect.animation_lock_duration = wait_time
+                        effect.animation_lock_duration = max(0., wait_time)
                         effect_bytes = bytes(effect)
                         ipc.data = effect_bytes + ipc.data[len(effect_bytes):]
                         ipc_bytes = bytes(ipc)
@@ -510,24 +511,26 @@ class Connection:
                                                    XivMessageIpc.TYPE_CUSTOM,
                                                    XivMessageIpc.SUBTYPE_CUSTOM_ORIGINAL_WAIT_TIME,
                                                    ipc.server_id, ipc.epoch,
-                                                   XivMessageIpcCustomOriginalWaitTime.make(effect.source_sequence, original_wait_time)
+                                                   XivMessageIpcCustomOriginalWaitTime.make(effect.source_sequence,
+                                                                                            original_wait_time)
                                                ))
                         ))
 
                 elif ipc.subtype == self.SUBTYPE_RESPONSE_ACTOR_CONTROL_SELF:
                     control = XivMessageIpcActorControlSelf(ipc.data, 0)
                     if control.category == XivMessageIpcActorControlSelf.CATEGORY_ROLLBACK:
+                        source_sequence = control.param_5
+                        while self.pending_actions and self.pending_actions[0].sequence != source_sequence:
+                            item = self.pending_actions.popleft()
+                            self.log(f"\t┎ ActionRequest ignored for processing: actionId={item.action_id:04x} "
+                                     f"sequence={source_sequence:04x}")
 
                         if self.pending_actions:
                             self.pending_actions.popleft()
 
                         self.log(f"S2C_ActorControlSelf/ActionRejected: "
-                                 f"p1={control.param_1:08x} "
-                                 f"p2={control.param_2:08x} "
-                                 f"actionId={control.param_3:04x}"
-                                 f"p4={control.param_4:08x} "
-                                 f"p5={control.param_5:08x} "
-                                 f"p6={control.param_6:08x} ")
+                                 f"actionId={control.param_2:04x}"
+                                 f"sourceSequence={source_sequence:08x}")
 
                 elif ipc.subtype == self.SUBTYPE_RESPONSE_ACTOR_CONTROL:
                     control = XivMessageIpcActorControl(ipc.data, 0)
@@ -563,35 +566,39 @@ class Connection:
     def run(self):
         self.remote.settimeout(3)
         threads = []
-        try:
+        with open(f"/tmp/xmlm.{datetime.datetime.now():%Y%m%d%H%M%S}.{self.conn_id}.log", "w") as self.log_fp:
             try:
-                self.remote.connect(self.destination)
-            except (ConnectionError, socket.timeout):
-                return
-            self.remote.settimeout(60)
+                try:
+                    self.remote.connect(self.destination)
+                except (ConnectionError, socket.timeout):
+                    return
+                self.remote.settimeout(60)
 
-            threads.append(threading.Thread(target=self.relay, args=(self.socket.recv,
-                                                                     self.remote.send,
-                                                                     self.source_to_destination,
-                                                                     "S2D")))
-            threads.append(threading.Thread(target=self.relay, args=(self.remote.recv,
-                                                                     self.socket.send,
-                                                                     self.destination_to_source,
-                                                                     "D2S")))
-            for x in threads:
-                x.start()
-            self.broken_event.wait()
-        finally:
-            self.remote.close()
-            self.socket.close()
-            for x in threads:
-                x.join()
-            self.log("Closed")
-            Connection.all_connections.remove(self)
+                threads.append(threading.Thread(target=self.relay, args=(self.socket.recv,
+                                                                         self.remote.send,
+                                                                         self.source_to_destination,
+                                                                         "S2D")))
+                threads.append(threading.Thread(target=self.relay, args=(self.remote.recv,
+                                                                         self.socket.send,
+                                                                         self.destination_to_source,
+                                                                         "D2S")))
+                for x in threads:
+                    x.start()
+                self.broken_event.wait()
+            finally:
+                self.remote.close()
+                self.socket.close()
+                for x in threads:
+                    x.join()
+                self.log("Closed")
+                Connection.all_connections.remove(self)
 
     def log(self, *msg):
         with multithread_print_lock:
-            print(f"[{self.conn_id}]", datetime.datetime.now(), *msg)
+            text = " ".join(str(x) for x in ([datetime.datetime.now(), *msg]))
+            print(f"[{self.conn_id}]", text)
+            if self.log_fp:
+                self.log_fp.write(text)
 
 
 def __main__() -> int:
