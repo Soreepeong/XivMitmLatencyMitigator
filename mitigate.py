@@ -322,6 +322,8 @@ class PendingAction:
     action_id: int
     sequence: int
     request_timestamp: float = dataclasses.field(default_factory=time.time)
+    response_timestamp: float = 0
+    original_wait_time: float = 0
     is_cast: bool = False
 
 
@@ -342,6 +344,7 @@ class Connection:
         self.broken_event = threading.Event()
 
         self.last_animation_lock_ends_at = 0
+        self.last_successful_request = PendingAction(0, 0)
 
         self.is_game_connection = True
 
@@ -460,19 +463,20 @@ class Connection:
                     now = time.time()
 
                     if effect.source_sequence == 0:
-                        if effect.action_id in (ACTION_ID_AUTO_ATTACK, ACTION_ID_AUTO_ATTACK_MCH):
-                            if self.last_animation_lock_ends_at > now:
-                                # if animation lock is supposedly already in progress,
-                                # add the new value to previously in-progress animation lock, instead of replacing it.
-                                self.last_animation_lock_ends_at += AUTO_ATTACK_DELAY
-                                wait_time = self.last_animation_lock_ends_at - now
-
-                            else:
-                                # even if it wasn't, the server would consider other actions in progress when
-                                # calculating auto-attack delay, so we fix it to 100ms.
-                                wait_time = AUTO_ATTACK_DELAY
-                        else:
-                            self.log(f"\t┎ Not user-originated, and isn't an auto-attack ({effect.action_id:04x})")
+                        # Process actions originating from server.
+                        if (not self.last_successful_request.is_cast
+                                and self.last_successful_request.sequence
+                                and self.last_animation_lock_ends_at > now):
+                            self.last_successful_request.action_id = effect.action_id
+                            self.last_successful_request.sequence = 0
+                            self.last_animation_lock_ends_at += (
+                                    (original_wait_time + now)
+                                    - (self.last_successful_request.original_wait_time
+                                       + self.last_successful_request.response_timestamp)
+                            )
+                            self.last_animation_lock_ends_at = max(self.last_animation_lock_ends_at,
+                                                                   now + AUTO_ATTACK_DELAY)
+                            wait_time = self.last_animation_lock_ends_at - now
 
                     else:
                         while self.pending_actions and self.pending_actions[0].sequence != effect.source_sequence:
@@ -481,12 +485,14 @@ class Connection:
                                      f"sequence={item.sequence:04x}")
 
                         if self.pending_actions:
-                            item = self.pending_actions.popleft()
+                            self.last_successful_request = self.pending_actions.popleft()
                             # 100ms animation lock after cast ends stays.
                             # Modify animation lock duration for instant actions only.
                             # Since no other action is in progress right before the cast ends,
                             # we can safely replace the animation lock with the latest after-cast lock.
-                            if not item.is_cast:
+                            if not self.last_successful_request.is_cast:
+                                self.last_successful_request.response_timestamp = now
+                                self.last_successful_request.original_wait_time = original_wait_time
                                 self.last_animation_lock_ends_at += original_wait_time + EXTRA_DELAY
                                 wait_time = self.last_animation_lock_ends_at - now
 
