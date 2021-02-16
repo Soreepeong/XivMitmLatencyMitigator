@@ -350,22 +350,22 @@ class Connection:
 
         # See: https://github.com/ravahn/machina/tree/NetworkStructs/Machina.FFXIV/Headers/Opcodes
         if any(ipaddress.ip_address(self.destination[0]) in x for x in INTL_DATACENTER_IP_NETWORK):
-            self.SUBTYPE_RESPONSE_ACTOR_CAST = 0x02b2
-            self.SUBTYPE_RESPONSE_ACTOR_CONTROL = 0x00f0
-            self.SUBTYPE_RESPONSE_ACTOR_CONTROL_SELF = 0x0350
-            self.SUBTYPE_RESPONSE_ACTION_RESULT = [0x021f, 0x03df, 0x00ad, 0x0229, 0x0197]
+            self.SUBTYPE_RESPONSE_ACTOR_CAST = 0x0303
+            self.SUBTYPE_RESPONSE_ACTOR_CONTROL = 0x0347
+            self.SUBTYPE_RESPONSE_ACTOR_CONTROL_SELF = 0x02fc
+            self.SUBTYPE_RESPONSE_ACTION_RESULT = [0x024b, 0x03da, 0x03e6, 0x01c0, 0x03b3]
 
-            self.SUBTYPE_REQUEST_ACTION = 0x017a
+            self.SUBTYPE_REQUEST_ACTION = 0x01de
 
             self.log(f"New[INTL]:", self.socket.getsockname(), self.socket.getpeername(), self.destination)
 
         elif any(ipaddress.ip_address(self.destination[0]) in x for x in KR_DATACENTER_IP_NETWORK):
-            self.SUBTYPE_RESPONSE_ACTOR_CAST = 0x03b8
-            self.SUBTYPE_RESPONSE_ACTOR_CONTROL = 0x013d
-            self.SUBTYPE_RESPONSE_ACTOR_CONTROL_SELF = 0x025f
-            self.SUBTYPE_RESPONSE_ACTION_RESULT = [0x0266, 0x0167, 0x03a7, 0x016b, 0x0231]
+            self.SUBTYPE_RESPONSE_ACTOR_CAST = 0x0303
+            self.SUBTYPE_RESPONSE_ACTOR_CONTROL = 0x0347
+            self.SUBTYPE_RESPONSE_ACTOR_CONTROL_SELF = 0x02fc
+            self.SUBTYPE_RESPONSE_ACTION_RESULT = [0x024b, 0x03da, 0x03e6, 0x01c0, 0x03b3]
 
-            self.SUBTYPE_REQUEST_ACTION = 0x00f0
+            self.SUBTYPE_REQUEST_ACTION = 0x01de
 
             self.log(f"New[KR]:", self.socket.getsockname(), self.socket.getpeername(), self.destination)
         else:
