@@ -1,6 +1,7 @@
 #!/usr/bin/sudo python
 
 import collections
+import ctypes
 import dataclasses
 import datetime
 import ipaddress
@@ -37,6 +38,86 @@ KR_DATACENTER_IP_NETWORK = set(ipaddress.ip_network(".".join(x.split(".")[0:3]) 
                                for x in KR_DATACENTER_IP_NETWORK)
 
 multithread_print_lock = threading.Lock()
+
+
+class TcpInfo(ctypes.Structure):
+    """TCP_INFO struct in linux 4.2
+    see /usr/include/linux/tcp.h for details"""
+
+    __u8 = ctypes.c_uint8
+    __u32 = ctypes.c_uint32
+    __u64 = ctypes.c_uint64
+
+    _fields_ = [
+        ("tcpi_state", __u8),
+        ("tcpi_ca_state", __u8),
+        ("tcpi_retransmits", __u8),
+        ("tcpi_probes", __u8),
+        ("tcpi_backoff", __u8),
+        ("tcpi_options", __u8),
+        ("tcpi_snd_wscale", __u8, 4), ("tcpi_rcv_wscale", __u8, 4),
+
+        ("tcpi_rto", __u32),
+        ("tcpi_ato", __u32),
+        ("tcpi_snd_mss", __u32),
+        ("tcpi_rcv_mss", __u32),
+
+        ("tcpi_unacked", __u32),
+        ("tcpi_sacked", __u32),
+        ("tcpi_lost", __u32),
+        ("tcpi_retrans", __u32),
+        ("tcpi_fackets", __u32),
+
+        # Times
+        ("tcpi_last_data_sent", __u32),
+        ("tcpi_last_ack_sent", __u32),
+        ("tcpi_last_data_recv", __u32),
+        ("tcpi_last_ack_recv", __u32),
+        # Metrics
+        ("tcpi_pmtu", __u32),
+        ("tcpi_rcv_ssthresh", __u32),
+        ("tcpi_rtt", __u32),
+        ("tcpi_rttvar", __u32),
+        ("tcpi_snd_ssthresh", __u32),
+        ("tcpi_snd_cwnd", __u32),
+        ("tcpi_advmss", __u32),
+        ("tcpi_reordering", __u32),
+
+        ("tcpi_rcv_rtt", __u32),
+        ("tcpi_rcv_space", __u32),
+
+        ("tcpi_total_retrans", __u32),
+
+        ("tcpi_pacing_rate", __u64),
+        ("tcpi_max_pacing_rate", __u64),
+
+        # RFC4898 tcpEStatsAppHCThruOctetsAcked
+        ("tcpi_bytes_acked", __u64),
+        # RFC4898 tcpEStatsAppHCThruOctetsReceived
+        ("tcpi_bytes_received", __u64),
+        # RFC4898 tcpEStatsPerfSegsOut
+        ("tcpi_segs_out", __u32),
+        # RFC4898 tcpEStatsPerfSegsIn
+        ("tcpi_segs_in", __u32),
+    ]
+    del __u8, __u32, __u64
+
+    def __repr__(self):
+        keyval = ["{}={!r}".format(x[0], getattr(self, x[0]))
+                  for x in self._fields_]
+        fields = ", ".join(keyval)
+        return "{}({})".format(self.__class__.__name__, fields)
+
+    @classmethod
+    def from_socket(cls, sock):
+        """Takes a socket, and attempts to get TCP_INFO stats on it. Returns a
+        TcpInfo struct"""
+        # http://linuxgazette.net/136/pfeiffer.html
+        padsize = ctypes.sizeof(TcpInfo)
+        data = sock.getsockopt(socket.SOL_TCP, socket.TCP_INFO, padsize)
+        # On older kernels, we get fewer bytes, pad with null to fit
+        padded = data.ljust(padsize, b'\0')
+        return cls.from_buffer_copy(padded)
 
 
 class IncompleteDataException(ValueError):
@@ -335,11 +416,15 @@ class Connection:
     def __init__(self, sock: socket.socket, source: typing.Tuple[str, int]):
         self.source = source
         self.socket = sock
+        self.socket.setsockopt(socket.SOL_TCP, socket.TCP_NODELAY, 1)
+        self.socket.setsockopt(socket.SOL_TCP, socket.TCP_QUICKACK, 1)
 
         self.conn_id = self.socket.fileno()
         srv_port, srv_ip = struct.unpack("!2xH4s8x", self.socket.getsockopt(socket.SOL_IP, SO_ORIGINAL_DST, 16))
         self.destination = (socket.inet_ntoa(srv_ip), srv_port)
         self.remote = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.remote.setsockopt(socket.SOL_TCP, socket.TCP_NODELAY, 1)
+        self.remote.setsockopt(socket.SOL_TCP, socket.TCP_QUICKACK, 1)
 
         self.broken_event = threading.Event()
 
@@ -461,6 +546,7 @@ class Connection:
                     original_wait_time = wait_time_dict.get(effect.source_sequence, effect.animation_lock_duration)
                     wait_time = original_wait_time
                     now = time.time()
+                    extra_message = ""
 
                     if effect.source_sequence == 0:
                         # Process actions originating from server.
@@ -493,17 +579,34 @@ class Connection:
                             if not self.last_successful_request.is_cast:
                                 self.last_successful_request.response_timestamp = now
                                 self.last_successful_request.original_wait_time = original_wait_time
-                                self.last_animation_lock_ends_at += original_wait_time + EXTRA_DELAY
+
+                                tcp_info_c2m = TcpInfo.from_socket(self.socket)
+                                tcp_info_m2s = TcpInfo.from_socket(self.remote)
+                                if tcp_info_c2m is not None:
+                                    extra_message += f"c2m({int(tcp_info_c2m.tcpi_rtt / 1000)}ms) "
+                                if tcp_info_m2s is not None:
+                                    extra_message += f"m2s({int(tcp_info_m2s.tcpi_rtt / 1000)}ms) "
+                                if tcp_info_c2m is None or tcp_info_m2s is None:
+                                    extra_delay = EXTRA_DELAY
+                                else:
+                                    latency = (tcp_info_c2m.tcpi_rtt + tcp_info_m2s.tcpi_rtt) / 1000000.
+                                    delay = (self.last_successful_request.response_timestamp
+                                             - self.last_successful_request.request_timestamp)
+                                    extra_delay = max(0., delay - latency)
+                                    extra_message += (f"latency={int(latency * 1000)}ms delay={int(delay * 1000)}ms "
+                                                      f"extraDelay={int(extra_delay * 1000)}ms")
+
+                                self.last_animation_lock_ends_at += original_wait_time + extra_delay
                                 wait_time = self.last_animation_lock_ends_at - now
 
                     if math.isclose(wait_time, original_wait_time):
                         self.log(f"S2C_ActionEffect: actionId={effect.action_id:04x} "
                                  f"sourceSequence={effect.source_sequence:04x} "
-                                 f"wait={int(original_wait_time * 1000)}ms")
+                                 f"wait={int(original_wait_time * 1000)}ms {extra_message}")
                     else:
                         self.log(f"S2C_ActionEffect: actionId={effect.action_id:04x} "
                                  f"sourceSequence={effect.source_sequence:04x} "
-                                 f"wait={int(original_wait_time * 1000)}ms->{int(wait_time * 1000)}ms")
+                                 f"wait={int(original_wait_time * 1000)}ms->{int(wait_time * 1000)}ms {extra_message}")
                         effect.animation_lock_duration = max(0., wait_time)
                         effect_bytes = bytes(effect)
                         ipc.data = effect_bytes + ipc.data[len(effect_bytes):]
@@ -619,6 +722,8 @@ class Connection:
 
 def __main__() -> int:
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_TCP, socket.TCP_NODELAY, 1)
+    listener.setsockopt(socket.SOL_TCP, socket.TCP_QUICKACK, 1)
     while True:
         port = random.randint(10000, 65535)
         try:
