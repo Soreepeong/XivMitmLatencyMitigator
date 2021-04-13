@@ -435,7 +435,7 @@ class Connection:
 
         # See: https://github.com/ravahn/machina/tree/NetworkStructs/Machina.FFXIV/Headers/Opcodes
         if any(ipaddress.ip_address(self.destination[0]) in x for x in INTL_DATACENTER_IP_NETWORK):
-            self.SUBTYPE_RESPONSE_ACTOR_CAST = 0x03c0
+            self.SUBTYPE_RESPONSE_ACTOR_CAST = 0x00b6
             self.SUBTYPE_RESPONSE_ACTOR_CONTROL = 0x03b5
             self.SUBTYPE_RESPONSE_ACTOR_CONTROL_SELF = 0x03c0
             self.SUBTYPE_RESPONSE_ACTION_RESULT = [0x0204, 0x01c7, 0x032a, 0x035c, 0x0d20]
