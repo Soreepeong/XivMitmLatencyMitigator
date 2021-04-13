@@ -435,22 +435,22 @@ class Connection:
 
         # See: https://github.com/ravahn/machina/tree/NetworkStructs/Machina.FFXIV/Headers/Opcodes
         if any(ipaddress.ip_address(self.destination[0]) in x for x in INTL_DATACENTER_IP_NETWORK):
-            self.SUBTYPE_RESPONSE_ACTOR_CAST = 0x034c
-            self.SUBTYPE_RESPONSE_ACTOR_CONTROL = 0x00c2
-            self.SUBTYPE_RESPONSE_ACTOR_CONTROL_SELF = 0x03d5
-            self.SUBTYPE_RESPONSE_ACTION_RESULT = [0x027f, 0x009b, 0x028c, 0x02ad, 0x00a7]
+            self.SUBTYPE_RESPONSE_ACTOR_CAST = 0x03c0
+            self.SUBTYPE_RESPONSE_ACTOR_CONTROL = 0x03b5
+            self.SUBTYPE_RESPONSE_ACTOR_CONTROL_SELF = 0x03c0
+            self.SUBTYPE_RESPONSE_ACTION_RESULT = [0x0204, 0x01c7, 0x032a, 0x035c, 0x0d20]
 
-            self.SUBTYPE_REQUEST_ACTION = 0x0388
+            self.SUBTYPE_REQUEST_ACTION = [0x03b0, 0x01a9]
 
             self.log(f"New[INTL]:", self.socket.getsockname(), self.socket.getpeername(), self.destination)
 
         elif any(ipaddress.ip_address(self.destination[0]) in x for x in KR_DATACENTER_IP_NETWORK):
-            self.SUBTYPE_RESPONSE_ACTOR_CAST = 0x0303
-            self.SUBTYPE_RESPONSE_ACTOR_CONTROL = 0x0347
-            self.SUBTYPE_RESPONSE_ACTOR_CONTROL_SELF = 0x02fc
-            self.SUBTYPE_RESPONSE_ACTION_RESULT = [0x024b, 0x03da, 0x03e6, 0x01c0, 0x03b3]
+            self.SUBTYPE_RESPONSE_ACTOR_CAST = 0x012c
+            self.SUBTYPE_RESPONSE_ACTOR_CONTROL = 0x017a
+            self.SUBTYPE_RESPONSE_ACTOR_CONTROL_SELF = 0x007c
+            self.SUBTYPE_RESPONSE_ACTION_RESULT = [0x02d0, 0x0199, 0x02d1, 0x01a4, 0x016e]
 
-            self.SUBTYPE_REQUEST_ACTION = 0x01de
+            self.SUBTYPE_REQUEST_ACTION = [0x02b3, 0x0250]
 
             self.log(f"New[KR]:", self.socket.getsockname(), self.socket.getpeername(), self.destination)
         else:
@@ -507,7 +507,7 @@ class Connection:
                 ipc = XivMessageIpc(message.data, 0)
                 if ipc.type != XivMessageIpc.TYPE_INTERESTED:
                     continue
-                if ipc.subtype == self.SUBTYPE_REQUEST_ACTION:
+                if ipc.subtype in self.SUBTYPE_REQUEST_ACTION:
                     request = XivMessageIpcActionRequest(ipc.data, 0)
                     self.pending_actions.append(PendingAction(request.action_id, request.sequence))
 
