@@ -438,7 +438,7 @@ class Connection:
             self.SUBTYPE_RESPONSE_ACTOR_CAST = 0x00b6
             self.SUBTYPE_RESPONSE_ACTOR_CONTROL = 0x03b5
             self.SUBTYPE_RESPONSE_ACTOR_CONTROL_SELF = 0x03c0
-            self.SUBTYPE_RESPONSE_ACTION_RESULT = [0x0204, 0x01c7, 0x032a, 0x035c, 0x0d20]
+            self.SUBTYPE_RESPONSE_ACTION_RESULT = [0x0204, 0x01c7, 0x032a, 0x035c, 0x02c5]
 
             self.SUBTYPE_REQUEST_ACTION = [0x03b0, 0x01a9]
 
