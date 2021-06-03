@@ -593,7 +593,7 @@ class Connection:
                                     delay = (self.last_successful_request.response_timestamp
                                              - self.last_successful_request.request_timestamp)
                                     extra_delay = max(0., delay - latency)
-                                    extra_delay = min(0.15, extra_delay)
+                                    extra_delay = min(0.075, extra_delay)
                                     extra_message += (f"latency={int(latency * 1000)}ms delay={int(delay * 1000)}ms "
                                                       f"extraDelay={int(extra_delay * 1000)}ms")
 
