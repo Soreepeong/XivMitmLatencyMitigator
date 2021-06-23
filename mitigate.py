@@ -8,17 +8,24 @@ import ipaddress
 import math
 import os
 import random
+import select
+import signal
 import socket
 import struct
-import threading
+import sys
 import time
 import typing
 import zlib
+
+import json
+
+import requests
 
 ACTION_ID_AUTO_ATTACK = 0x0007
 ACTION_ID_AUTO_ATTACK_MCH = 0x0008
 AUTO_ATTACK_DELAY = 0.1
 SO_ORIGINAL_DST = 80
+OPCODE_DEFINITION_LIST_URL = "https://api.github.com/repos/Soreepeong/XivAlexander/contents/StaticData/OpcodeDefinition"
 
 # Server responses have been usually taking between 50ms and 100ms on below-1ms
 # latency to server, so 75ms is a good average.
@@ -37,7 +44,87 @@ KR_DATACENTER_IP_NETWORK = [socket.gethostbyname("lobbyf-live.ff14.co.kr")]
 KR_DATACENTER_IP_NETWORK = set(ipaddress.ip_network(".".join(x.split(".")[0:3]) + ".0/24")
                                for x in KR_DATACENTER_IP_NETWORK)
 
-multithread_print_lock = threading.Lock()
+
+@dataclasses.dataclass
+class OpcodeDefinition:
+    Name: str
+    C2S_ActionRequest: int
+    C2S_ActionRequestGroundTargeted: int
+    S2C_ActionEffect01: int
+    S2C_ActionEffect08: int
+    S2C_ActionEffect16: int
+    S2C_ActionEffect24: int
+    S2C_ActionEffect32: int
+    S2C_ActorCast: int
+    S2C_ActorControl: int
+    S2C_ActorControlSelf: int
+    S2C_AddStatusEffect: int
+    Server_IpRange: typing.List[typing.Union[ipaddress.IPv4Network,
+                                             typing.Tuple[ipaddress.IPv4Address, ipaddress.IPv4Address]]]
+    Server_PortRange: typing.List[typing.Tuple[int, int]]
+
+    @classmethod
+    def from_dict(cls, data: dict):
+        kwargs = {}
+        for field in dataclasses.fields(cls):
+            field: dataclasses.Field
+            if field.type is int:
+                kwargs[field.name] = int(data[field.name], 0)
+            elif field.name == "Server_IpRange":
+                iplist = []
+                for partstr in data[field.name].split(","):
+                    part = [x.strip() for x in partstr.split("-")]
+                    try:
+                        if len(part) == 1:
+                            iplist.append(ipaddress.IPv4Network(part[0]))
+                        elif len(part) == 2:
+                            iplist.append(tuple(sorted(ipaddress.IPv4Address(x) for x in part)))
+                        else:
+                            raise ValueError
+                    except ValueError:
+                        print("Skipping invalid IP address definition", partstr)
+                kwargs[field.name] = iplist
+            elif field.name == "Server_PortRange":
+                portlist = []
+                for partstr in data[field.name].split(","):
+                    part = [x.strip() for x in partstr.split("-")]
+                    try:
+                        if len(part) == 1:
+                            portlist.append((int(part[0], 0), int(part[0], 0)))
+                        elif len(part) == 2:
+                            portlist.append((int(part[0], 0), int(part[1], 0)))
+                        else:
+                            raise ValueError
+                    except ValueError:
+                        print("Skipping invalid port definition", partstr)
+                kwargs[field.name] = portlist
+            else:
+                kwargs[field.name] = None if data[field.name] is None else field.type(data[field.name])
+        return OpcodeDefinition(**kwargs)
+
+    def is_request(self, opcode: int):
+        return (opcode == self.C2S_ActionRequest
+                or opcode == self.C2S_ActionRequestGroundTargeted)
+
+    def is_action_effect(self, opcode: int):
+        return (opcode == self.S2C_ActionEffect01
+                or opcode == self.S2C_ActionEffect08
+                or opcode == self.S2C_ActionEffect16
+                or opcode == self.S2C_ActionEffect24
+                or opcode == self.S2C_ActionEffect32)
+
+
+definitions: typing.List[OpcodeDefinition] = []
+
+
+@dataclasses.dataclass
+class SocketSet:
+    source: socket.socket
+    target: socket.socket
+    log_prefix: str
+    process_function: callable
+    incoming: typing.Optional[bytearray] = dataclasses.field(default_factory=bytearray)
+    outgoing: typing.Optional[bytearray] = dataclasses.field(default_factory=bytearray)
 
 
 class TcpInfo(ctypes.Structure):
@@ -359,7 +446,7 @@ class XivBundle(StructBase, definition="<16sQH2sHHBB6s"):
         return res
 
     @classmethod
-    def find(cls, data: bytes):
+    def find(cls, data: typing.Union[bytes, bytearray]):
         offset = 0
         while offset < len(data):
             available_bytes = len(data) - offset
@@ -377,13 +464,14 @@ class XivBundle(StructBase, definition="<16sQH2sHHBB6s"):
                 i = min(mc1, mc2)
             if i == -1:  # no hope
                 yield data[offset:]
+                offset = len(data)
                 break
             if i != offset:
                 yield data[offset:i]
                 offset = i
 
             if len(data) < offset + cls.DEFINITION.size:
-                return data[offset:]
+                break
 
             try:
                 bundle = XivBundle(data, offset)
@@ -391,11 +479,11 @@ class XivBundle(StructBase, definition="<16sQH2sHHBB6s"):
                 # bundle.length might be modified from this point
                 yield bundle
             except IncompleteDataException:
-                return data[offset:]
+                break
             except InvalidDataException:
                 yield data[offset:offset + 1]
                 offset += 1
-        return b""
+        return offset
 
 
 @dataclasses.dataclass
@@ -409,95 +497,53 @@ class PendingAction:
 
 
 class Connection:
-    all_connections: typing.ClassVar["Connection"] = list()
     pending_actions: typing.Deque[PendingAction] = collections.deque()
     log_fp: typing.Optional[typing.TextIO] = None
+    opcodes: typing.Optional[OpcodeDefinition]
 
     def __init__(self, sock: socket.socket, source: typing.Tuple[str, int]):
         self.source = source
         self.socket = sock
         self.socket.setsockopt(socket.SOL_TCP, socket.TCP_NODELAY, 1)
         self.socket.setsockopt(socket.SOL_TCP, socket.TCP_QUICKACK, 1)
+        self.socket.setblocking(False)
 
-        self.conn_id = self.socket.fileno()
+        self.screen_prefix = f"[{os.getpid():>6}]"
         srv_port, srv_ip = struct.unpack("!2xH4s8x", self.socket.getsockopt(socket.SOL_IP, SO_ORIGINAL_DST, 16))
         self.destination = (socket.inet_ntoa(srv_ip), srv_port)
         self.remote = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.remote.setsockopt(socket.SOL_TCP, socket.TCP_NODELAY, 1)
         self.remote.setsockopt(socket.SOL_TCP, socket.TCP_QUICKACK, 1)
-
-        self.broken_event = threading.Event()
+        self.remote.setblocking(False)
 
         self.last_animation_lock_ends_at = 0
         self.last_successful_request = PendingAction(0, 0)
 
-        self.is_game_connection = True
-
-        # See: https://github.com/ravahn/machina/tree/NetworkStructs/Machina.FFXIV/Headers/Opcodes
-        if any(ipaddress.ip_address(self.destination[0]) in x for x in INTL_DATACENTER_IP_NETWORK):
-            self.SUBTYPE_RESPONSE_ACTOR_CAST = 0x02cc
-            self.SUBTYPE_RESPONSE_ACTOR_CONTROL = 0x0164
-            self.SUBTYPE_RESPONSE_ACTOR_CONTROL_SELF = 0x0356
-            self.SUBTYPE_RESPONSE_ACTION_RESULT = [0x008f, 0x0247, 0x02c1, 0x0295, 0x034c]
-
-            self.SUBTYPE_REQUEST_ACTION = [0x03a0, 0x036b]
-
-            self.log(f"New[INTL]:", self.socket.getsockname(), self.socket.getpeername(), self.destination)
-
-        elif any(ipaddress.ip_address(self.destination[0]) in x for x in KR_DATACENTER_IP_NETWORK):
-            self.SUBTYPE_RESPONSE_ACTOR_CAST = 0x012c
-            self.SUBTYPE_RESPONSE_ACTOR_CONTROL = 0x017a
-            self.SUBTYPE_RESPONSE_ACTOR_CONTROL_SELF = 0x007c
-            self.SUBTYPE_RESPONSE_ACTION_RESULT = [0x02d0, 0x0199, 0x02d1, 0x01a4, 0x016e]
-
-            self.SUBTYPE_REQUEST_ACTION = [0x02b3, 0x0250]
-
-            self.log(f"New[KR]:", self.socket.getsockname(), self.socket.getpeername(), self.destination)
-        else:
-            self.is_game_connection = False
-            self.log(f"New[-]:", self.socket.getsockname(), self.socket.getpeername(), self.destination)
-
-    def relay(self, read_fn, write_fn, process_fn: typing.Callable[[XivBundle], XivBundle], log_prefix: str):
-        try:
-            buffer = b""
-            more = True
-            while more:
-                try:
-                    data = read_fn(65536)
-                except (ConnectionError, socket.timeout, OSError):
-                    break
-                buffer += data
-                if not data:
-                    more = False
-                if self.is_game_connection:
-                    it = XivBundle.find(buffer)
-                    while True:
-                        try:
-                            bundle = next(it)
-                        except StopIteration as e:
-                            buffer = e.value
-                            break
-
-                        if type(bundle) is bytes:
-                            self.log(log_prefix, "discarded", " ".join(f"{x:02x}" for x in bundle))
-                            data = bundle
-                        else:
-                            bundle = process_fn(bundle)
-                            data = bytes(bundle)
-                        try:
-                            write_fn(data)
-                        except (ConnectionError, socket.timeout, OSError):
-                            break
+        dest_ip = ipaddress.IPv4Address(self.destination[0])
+        for definition in definitions:
+            for iprange in definition.Server_IpRange:
+                if isinstance(iprange, ipaddress.IPv4Network):
+                    if dest_ip in iprange:
+                        break
                 else:
-                    write_fn(buffer)
-                    buffer = ""
-            if buffer:
-                try:
-                    write_fn(buffer)
-                except (ConnectionError, socket.timeout, OSError):
-                    pass
-        finally:
-            self.broken_event.set()
+                    if iprange[0] <= dest_ip <= iprange[1]:
+                        break
+            else:
+                continue
+
+            for port1, port2 in definition.Server_PortRange:
+                if port1 <= self.destination[1] <= port2:
+                    break
+            else:
+                continue
+
+            self.log(f"New[{definition.Name}]", self.socket.getsockname(), self.socket.getpeername(),
+                     self.destination)
+            self.opcodes = definition
+            break
+        else:
+            self.opcodes = None
+            self.log(f"New[-]:", self.socket.getsockname(), self.socket.getpeername(), self.destination)
 
     def source_to_destination(self, bundle: XivBundle):
         for message in bundle.messages:
@@ -507,7 +553,7 @@ class Connection:
                 ipc = XivMessageIpc(message.data, 0)
                 if ipc.type != XivMessageIpc.TYPE_INTERESTED:
                     continue
-                if ipc.subtype in self.SUBTYPE_REQUEST_ACTION:
+                if self.opcodes.is_request(ipc.subtype):
                     request = XivMessageIpcActionRequest(ipc.data, 0)
                     self.pending_actions.append(PendingAction(request.action_id, request.sequence))
 
@@ -541,7 +587,7 @@ class Connection:
                     wait_time_dict[data.source_sequence] = data.original_wait_time
                 if ipc.type != XivMessageIpc.TYPE_INTERESTED:
                     continue
-                if ipc.subtype in self.SUBTYPE_RESPONSE_ACTION_RESULT:
+                if self.opcodes.is_action_effect(ipc.subtype):
                     effect = XivMessageIpcActionEffect(ipc.data, 0)
                     original_wait_time = wait_time_dict.get(effect.source_sequence, effect.animation_lock_duration)
                     wait_time = original_wait_time
@@ -593,7 +639,7 @@ class Connection:
                                     delay = (self.last_successful_request.response_timestamp
                                              - self.last_successful_request.request_timestamp)
                                     extra_delay = max(0., delay - latency)
-                                    extra_delay = min(0.15, extra_delay)
+                                    extra_delay = min(2 * EXTRA_DELAY, extra_delay)
                                     extra_message += (f"latency={int(latency * 1000)}ms delay={int(delay * 1000)}ms "
                                                       f"extraDelay={int(extra_delay * 1000)}ms")
 
@@ -626,7 +672,7 @@ class Connection:
                                                ))
                         ))
 
-                elif ipc.subtype == self.SUBTYPE_RESPONSE_ACTOR_CONTROL_SELF:
+                elif ipc.subtype == self.opcodes.S2C_ActorControlSelf:
                     control = XivMessageIpcActorControlSelf(ipc.data, 0)
                     if control.category == XivMessageIpcActorControlSelf.CATEGORY_ROLLBACK:
                         action_id = control.param_3
@@ -647,7 +693,7 @@ class Connection:
                                  f"actionId={action_id:04x} "
                                  f"sourceSequence={source_sequence:08x}")
 
-                elif ipc.subtype == self.SUBTYPE_RESPONSE_ACTOR_CONTROL:
+                elif ipc.subtype == self.opcodes.S2C_ActorControl:
                     control = XivMessageIpcActorControl(ipc.data, 0)
                     if control.category == XivMessageIpcActorControl.CATEGORY_CANCEL_CAST:
                         action_id = control.param_3
@@ -661,7 +707,7 @@ class Connection:
 
                         self.log(f"S2C_ActorControl/CancelCast: actionId={action_id:04x}")
 
-                elif ipc.subtype == self.SUBTYPE_RESPONSE_ACTOR_CAST:
+                elif ipc.subtype == self.opcodes.S2C_ActorCast:
                     cast = XivMessageIpcActorCast(ipc.data, 0)
 
                     # Mark that the last request was a cast.
@@ -682,46 +728,152 @@ class Connection:
 
     def run(self):
         self.remote.settimeout(3)
-        threads = []
-        log_path = f"/tmp/xmlm.{datetime.datetime.now():%Y%m%d%H%M%S}.{self.conn_id}.log"
+        log_path = f"/tmp/xmlm.{datetime.datetime.now():%Y%m%d%H%M%S}.{os.getpid()}.log"
         self.log("Log will be saved to", log_path)
-        with open(log_path, "w") as self.log_fp:
+        with open(log_path, "w") as self.log_fp, self.socket, self.remote:
             try:
-                try:
-                    self.remote.connect(self.destination)
-                except (ConnectionError, socket.timeout):
-                    return
-                self.remote.settimeout(60)
+                self.remote.connect((str(self.destination[0]), self.destination[1]))
+                self.remote.settimeout(None)
 
-                threads.append(threading.Thread(target=self.relay, args=(self.socket.recv,
-                                                                         self.remote.send,
-                                                                         self.source_to_destination,
-                                                                         "S2D")))
-                threads.append(threading.Thread(target=self.relay, args=(self.remote.recv,
-                                                                         self.socket.send,
-                                                                         self.destination_to_source,
-                                                                         "D2S")))
-                for x in threads:
-                    x.start()
-                self.broken_event.wait()
-            finally:
-                self.remote.close()
-                self.socket.close()
-                for x in threads:
-                    x.join()
+                check_targets = {
+                    self.socket: SocketSet(self.socket, self.remote, "S2D", self.source_to_destination),
+                    self.remote: SocketSet(self.remote, self.socket, "D2S", self.destination_to_source),
+                }
+                while True:
+                    rlist = [
+                        k for k, v in check_targets.items() if v.incoming is not None
+                    ]
+                    wlist = [
+                        k for k, v in check_targets.items() if v.outgoing
+                    ]
+                    if not rlist and not wlist:
+                        break
+
+                    rlist, wlist, _ = select.select(rlist, wlist, [], 60)
+                    if not rlist and not wlist:  # timeout or empty
+                        break
+
+                    for target in check_targets.values():
+                        if target.source in rlist:
+                            try:
+                                data = target.source.recv(65536)
+                                if not data:
+                                    raise EOFError
+                            except (OSError, EOFError):
+                                self.log(target.log_prefix, "Read finish")
+                                target.incoming = None
+                                continue
+
+                            if self.opcodes is None:
+                                target.outgoing.extend(data)
+                            else:
+                                target.incoming.extend(data)
+                                it = XivBundle.find(target.incoming)
+                                while True:
+                                    try:
+                                        bundle = next(it)
+                                    except StopIteration as e:
+                                        del target.incoming[0:e.value]
+                                        break
+
+                                    if type(bundle) is bytes:
+                                        self.log(target.log_prefix, "discarded", " ".join(f"{x:02x}" for x in bundle))
+                                        target.outgoing.extend(bundle)
+                                    else:
+                                        bundle = target.process_function(bundle)
+                                        target.outgoing.extend(bytes(bundle))
+
+                    for target in check_targets.values():
+                        if target.outgoing is None:
+                            continue
+                        if target.outgoing:
+                            try:
+                                target.target.send(target.outgoing)
+                            except socket.error as e:
+                                if e.errno not in (socket.EWOULDBLOCK, socket.EAGAIN):
+                                    raise
+                                continue
+                            target.outgoing.clear()
+                        if target.incoming is None:
+                            target.outgoing = None
+                            self.log(target.log_prefix, "Source read and target write shutdown")
+                            try:
+                                target.source.shutdown(socket.SHUT_RD)
+                            except OSError:
+                                pass
+                            try:
+                                target.target.shutdown(socket.SHUT_WR)
+                            except OSError:
+                                pass
                 self.log("Closed")
-                Connection.all_connections.remove(self)
+            except Exception as e:
+                self.log("Closed, exception occurred:", type(e), e)
+                return -1
+            except KeyboardInterrupt:
+                # do no cleanup
+                os._exit(0)
+            return 0
 
     def log(self, *msg):
-        with multithread_print_lock:
-            text = " ".join(str(x) for x in ([datetime.datetime.now(), *msg]))
-            print(f"[{self.conn_id}]", text)
+        text = " ".join(str(x) for x in ([datetime.datetime.now(), *msg]))
+        try:
+            print(self.screen_prefix, text)
+        except KeyboardInterrupt:
+            pass
+        finally:
             if self.log_fp:
                 self.log_fp.write(text + "\n")
                 self.log_fp.flush()
 
 
+def load_definitions():
+    global definitions
+    try:
+        with open("definitions.json", "r") as fp:
+            definitions = [OpcodeDefinition.from_dict(x) for x in json.load(fp)]
+    except Exception:
+        definitions_raw = []
+        print("Downloading opcode definition files...")
+        try:
+            rq = requests.get(OPCODE_DEFINITION_LIST_URL)
+            rq.raise_for_status()
+            filelist = json.loads(rq.content)
+
+            for f in filelist:
+                rq = requests.get(f["download_url"])
+                rq.raise_for_status()
+                data = json.loads(rq.content)
+                data["Name"] = f["name"]
+                definitions_raw.append(data)
+        except (requests.HTTPError, ConnectionError, json.JSONDecodeError) as e:
+            print(f"Failed to load opcode definition: {e}")
+            return -1
+        with open("definitions.json", "w") as fp:
+            json.dump(definitions_raw, fp)
+        definitions = [OpcodeDefinition.from_dict(x) for x in definitions_raw]
+
+
+def load_rules(port: int) -> typing.Set[str]:
+    rules = set()
+    for definition in definitions:
+        for iprange in definition.Server_IpRange:
+            rule = [
+                "-p tcp",
+                "-m multiport",
+                "--dports", ",".join(str(port1) if port1 == port2 else f"{port1}:{port2}"
+                                     for port1, port2 in definition.Server_PortRange)
+            ]
+            if isinstance(iprange, ipaddress.IPv4Network):
+                rule += ["-d", str(iprange)]
+            else:
+                rule += ["-m", "iprange", "--dst-range", f"{iprange[0]}-{iprange[1]}"]
+            rule.append(f"-j REDIRECT --to {port}")
+            rules.add(" ".join(rule))
+    return rules
+
+
 def __main__() -> int:
+    global definitions
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_TCP, socket.TCP_NODELAY, 1)
     listener.setsockopt(socket.SOL_TCP, socket.TCP_QUICKACK, 1)
@@ -733,34 +885,68 @@ def __main__() -> int:
             continue
         break
 
-    networks = ",".join(str(x) for x in INTL_DATACENTER_IP_NETWORK.union(KR_DATACENTER_IP_NETWORK))
-    if os.system(f"iptables -t nat -I PREROUTING -d {networks} -p tcp -j REDIRECT --to {port}"):
-        print("This program requires root permissions.\n")
-        return -1
+    load_definitions()
+
+    applied_rules = []
+    for rule in load_rules(port):
+        if os.system(f"iptables -t nat -I PREROUTING {rule}"):
+            for r in applied_rules:
+                os.system(f"iptables -t nat -D PREROUTING {r} > /dev/null")
+            print("This program requires root permissions.\n")
+            return -1
+        applied_rules.append(rule)
     os.system("sysctl -w net.ipv4.ip_forward=1")
 
     listener.listen(8)
     print(f"Listening on {listener.getsockname()}...")
     print("Press Ctrl+C to quit.")
-    try:
-        while True:
+
+    child_pids = set()
+
+    def on_child_exit(signum, frame):
+        if child_pids:
+            pid, status = os.waitpid(-1, os.WNOHANG)
+            if pid:
+                print(f"[{pid:<6}] has exit with status code {status}.")
+                child_pids.discard(pid)
+
+    signal.signal(signal.SIGCHLD, on_child_exit)
+
+    while True:
+        for child_pid in child_pids:
             try:
-                connection = Connection(*listener.accept())
-            except KeyboardInterrupt as e:
-                break
-            Connection.all_connections.append(connection)
-            threading.Thread(target=connection.run).start()
-        for x in list(Connection.all_connections):
-            x.broken_event.set()
-        for x in list(Connection.all_connections):
-            x.join()
-    finally:
-        if os.system(f"iptables -t nat -D PREROUTING -d {networks} -p tcp -j REDIRECT --to-port {port}"):
-            print("Failed to remove iptables rule.")
-            return -1
-        else:
-            print("Cleanup complete.")
-            return 0
+                os.kill(child_pid, 0)
+            except OSError:
+                child_pids.remove(child_pid)
+        try:
+            sock, source = listener.accept()
+        except KeyboardInterrupt:
+            break
+
+        child_pid = os.fork()
+        if child_pid == 0:
+            child_pids.clear()
+            listener.close()
+            return Connection(sock, source).run()
+        sock.close()
+        child_pids.add(child_pid)
+
+    for child_pid in child_pids:
+        try:
+            os.kill(child_pid, signal.SIGINT)
+        except OSError:
+            pass
+
+    err = False
+    for rule in applied_rules:
+        if os.system(f"iptables -t nat -D PREROUTING {rule}"):
+            print(f"Failed to remove iptables rule: {rule}")
+            err = True
+    if err:
+        return -1
+    else:
+        print("Cleanup complete.")
+        return 0
 
 
 if __name__ == "__main__":
