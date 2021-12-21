@@ -1021,7 +1021,7 @@ def load_definitions(update_opcodes: bool):
             raise RuntimeError("Definitions file older than an hour")
         with open("definitions.json", "r") as fp:
             definitions = [OpcodeDefinition.from_dict(x) for x in json.load(fp)]
-    except RuntimeError as e:
+    except Exception as e:
         logging.info(f"Failed to read previous opcode definition files: {e}")
         definitions_raw = []
 
