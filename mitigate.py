@@ -21,7 +21,7 @@ import zlib
 import json
 
 import logging.handlers
-import requests
+import urllib.request
 
 ACTION_ID_AUTO_ATTACK = 0x0007
 ACTION_ID_AUTO_ATTACK_MCH = 0x0008
@@ -1027,17 +1027,15 @@ def load_definitions(update_opcodes: bool):
 
         logging.info("Downloading opcode definition files...")
         try:
-            rq = requests.get(OPCODE_DEFINITION_LIST_URL)
-            rq.raise_for_status()
-            filelist = json.loads(rq.content)
+            with urllib.request.urlopen(OPCODE_DEFINITION_LIST_URL) as resp:
+                filelist = json.load(resp)
 
             for f in filelist:
-                rq = requests.get(f["download_url"])
-                rq.raise_for_status()
-                data = json.loads(rq.content)
+                with urllib.request.urlopen(f["download_url"]) as resp:
+                    data = json.load(resp)
                 data["Name"] = f["name"]
                 definitions_raw.append(data)
-        except (requests.HTTPError, ConnectionError, json.JSONDecodeError):
+        except Exception:
             logging.exception(f"Failed to load opcode definition")
             return -1
         with open("definitions.json", "w") as fp:
@@ -1066,6 +1064,10 @@ def load_rules(port: int, definitions: typing.List[OpcodeDefinition]) -> typing.
 
 
 def __main__() -> int:
+    if sys.version_info < (3, 8):
+        print("This script requires at least python 3.8")
+        return -1
+
     parser = argparse.ArgumentParser("XivMitmLatencyMitigator")
     parser.add_argument("-r", "--region", action="append", dest="region", default=[])
     parser.add_argument("-e", "--extra-delay", action="store", dest="extra_delay", default=0.075, type=float)
