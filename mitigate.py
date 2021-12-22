@@ -28,16 +28,18 @@ AUTO_ATTACK_DELAY = 0.1
 SO_ORIGINAL_DST = 80
 OPCODE_DEFINITION_LIST_URL = "https://api.github.com/repos/Soreepeong/XivAlexander/contents/StaticData/OpcodeDefinition"
 
+EXTRA_DELAY_HELP = """Server responses have been usually taking between 50ms and 100ms on below-1ms latency to server, so 75ms is a good average.
+The server will do sanity check on the frequency of action use requests,
+and it's very easy to identify whether you're trying to go below allowed minimum value.
+This addon is already in gray area. Do NOT decrease this value. You've been warned.
+Feel free to increase and see how does it feel like to play on high latency instead, though."""
+
 T = typing.TypeVar("T")
 ArgumentTuple = collections.namedtuple("ArgumentTuple", ("region", "extra_delay", "measure_ping", "update_opcodes"))
 
 
 def clamp(v: T, min_: T, max_: T) -> T:
     return max(min_, min(max_, v))
-
-
-class IncompleteDataException(ValueError):
-    pass
 
 
 class InvalidDataException(ValueError):
@@ -436,35 +438,38 @@ class XivBundleHeader(ctypes.LittleEndianStructure):
                 yield data[offset:i]
                 offset = i
 
-            if len(data) < offset + ctypes.sizeof(cls):
-                break
+            try:
+                bundle_header = cls.from_buffer(data, offset)
+                if len(data) - offset < bundle_header.length:
+                    raise ValueError
+                bundle_data = data[offset + ctypes.sizeof(bundle_header):offset + bundle_header.length]
+                bundle_length = bundle_header.length  # copy it, as it may get changed later
+            except ValueError:
+                break  # incomplete data
 
             try:
-                bundle_header = XivBundleHeader.from_buffer(data, offset)
-                if len(data) < offset + bundle_header.length:
-                    break
-
-                bundle_data = data[offset + ctypes.sizeof(bundle_header):offset + bundle_header.length]
-                offset += bundle_header.length
                 if bundle_header.zlib_compressed:
                     bundle_data = bytearray(zlib.decompress(bundle_data))
 
-                bundle_offset = 0
+                bundle_data_offset = 0
                 messages = list()
                 for i in range(bundle_header.message_count):
-                    try:
-                        message_header = XivMessageHeader.from_buffer(bundle_data, bundle_offset)
-                        message_data = bundle_data[bundle_offset:][ctypes.sizeof(message_header):message_header.length]
-                        messages.append((message_header, message_data))
-                    except IncompleteDataException:
+                    message_header = XivMessageHeader.from_buffer(bundle_data, bundle_data_offset)
+                    if message_header.length < ctypes.sizeof(message_header):
                         raise InvalidDataException
-                    bundle_offset += message_header.length
-                    if bundle_offset > len(bundle_data):
+                    message_data = bundle_data[bundle_data_offset + ctypes.sizeof(message_header):
+                                               bundle_data_offset + message_header.length]
+                    messages.append((message_header, message_data))
+                    bundle_data_offset += message_header.length
+                    if bundle_data_offset > len(bundle_data):
                         raise InvalidDataException
+
+                offset += bundle_length
                 yield bundle_header, messages
-            except IncompleteDataException:
-                break
-            except InvalidDataException:
+
+            except Exception as e:
+                if not isinstance(e, InvalidDataException):
+                    logging.exception("Unknown error occurred while trying to parse bundle")
                 yield data[offset:offset + 1]
                 offset += 1
         return offset
@@ -674,11 +679,10 @@ class Connection:
                 continue
             try:
                 ipc = XivMessageIpcHeader.from_buffer(message_data)
-                ipc_data = message_data[ctypes.sizeof(ipc):]
                 if ipc.type != XivMessageIpcType.UnknownButInterested:
                     continue
                 if self.opcodes.is_request(ipc.subtype):
-                    request = XivMessageIpcActionRequest.from_buffer(ipc_data)
+                    request = XivMessageIpcActionRequest.from_buffer(message_data, ctypes.sizeof(ipc))
                     self.pending_actions.append(PendingAction(request.action_id, request.sequence))
 
                     # If somehow latest action request has been made before last animation lock end time, keep it.
@@ -691,8 +695,8 @@ class Connection:
                             self.last_animation_lock_ends_at = self.pending_actions[-1].request_timestamp
 
                     logging.info(f"C2S_ActionRequest: actionId={request.action_id:04x} sequence={request.sequence:04x}")
-            except (InvalidDataException, IncompleteDataException):
-                continue
+            except Exception as e:
+                logging.exception(f"unknown error {e} occurred in upstream handler; skipping")
         return bundle_header, messages
 
     def to_downstream(self, bundle_header: XivBundleHeader,
@@ -706,15 +710,14 @@ class Connection:
                 continue
             try:
                 ipc = XivMessageIpcHeader.from_buffer(message_data)
-                ipc_data = message_data[ctypes.sizeof(ipc):]
                 if (ipc.type == XivMessageIpcType.XivMitmLatencyMitigatorCustom
                         and ipc.subtype == XivMitmLatencyMitigatorCustomSubtype.OriginalWaitTime):
-                    data = XivMessageIpcCustomOriginalWaitTime.from_buffer(ipc_data)
+                    data = XivMessageIpcCustomOriginalWaitTime.from_buffer(message_data, ctypes.sizeof(ipc))
                     wait_time_dict[data.source_sequence] = data.original_wait_time
                 if ipc.type != XivMessageIpcType.UnknownButInterested:
                     continue
                 if self.opcodes.is_action_effect(ipc.subtype):
-                    effect = XivMessageIpcActionEffect.from_buffer(ipc_data)
+                    effect = XivMessageIpcActionEffect.from_buffer(message_data, ctypes.sizeof(ipc))
                     original_wait_time = wait_time_dict.get(effect.source_sequence, effect.animation_lock_duration)
                     wait_time = original_wait_time
                     now = time.time()
@@ -796,7 +799,7 @@ class Connection:
                         message_insertions.append((i, custom_message, custom_message_data))
 
                 elif ipc.subtype == self.opcodes.S2C_ActorControlSelf:
-                    control = XivMessageIpcActorControlSelf.from_buffer(ipc_data)
+                    control = XivMessageIpcActorControlSelf.from_buffer(message_data, ctypes.sizeof(ipc))
                     if control.category == XivMessageIpcActorControlCategory.Rollback:
                         action_id = control.param_3
                         source_sequence = control.param_6
@@ -817,7 +820,7 @@ class Connection:
                                      f"sourceSequence={source_sequence:08x}")
 
                 elif ipc.subtype == self.opcodes.S2C_ActorControl:
-                    control = XivMessageIpcActorControl.from_buffer(ipc_data)
+                    control = XivMessageIpcActorControl.from_buffer(message_data, ctypes.sizeof(ipc))
                     if control.category == XivMessageIpcActorControlCategory.CancelCast:
                         action_id = control.param_3
                         while self.pending_actions and self.pending_actions[0].action_id != action_id:
@@ -831,7 +834,7 @@ class Connection:
                         logging.info(f"S2C_ActorControl/CancelCast: actionId={action_id:04x}")
 
                 elif ipc.subtype == self.opcodes.S2C_ActorCast:
-                    cast = XivMessageIpcActorCast.from_buffer(ipc_data)
+                    cast = XivMessageIpcActorCast.from_buffer(message_data, ctypes.sizeof(ipc))
 
                     # Mark that the last request was a cast.
                     # If it indeed is a cast, the game UI will block the user from generating additional requests,
@@ -843,8 +846,8 @@ class Connection:
                                  f"action_id_2={cast.action_id_2:04x} time={cast.cast_time:.3f} "
                                  f"target_id={cast.target_id:08x}")
 
-            except (InvalidDataException, IncompleteDataException):
-                continue
+            except Exception as e:
+                logging.exception(f"unknown error {e} occurred in downstream handler; skipping")
         for i, message_header, message_data in reversed(message_insertions):
             messages.insert(i, (message_header, message_data))
         return bundle_header, messages
@@ -1067,18 +1070,31 @@ def __main__() -> int:
         print("This script requires at least python 3.8")
         return -1
 
-    parser = argparse.ArgumentParser("XivMitmLatencyMitigator")
-    parser.add_argument("-r", "--region", action="append", dest="region", default=[])
-    parser.add_argument("-e", "--extra-delay", action="store", dest="extra_delay", default=0.075, type=float)
-    parser.add_argument("-m", "--measure-ping", action="store_true", dest="measure_ping", default=False)
-    parser.add_argument("-u", "--update-opcodes", action="store_true", dest="update_opcodes", default=False)
-    args: typing.Union[ArgumentTuple, argparse.Namespace] = parser.parse_args()
-
     logging.basicConfig(level=logging.INFO, force=True,
                         format="%(asctime)s\t%(process)d(main)\t%(levelname)s\t%(message)s",
                         handlers=[
                             logging.StreamHandler(sys.stderr),
                         ])
+
+    parser = argparse.ArgumentParser("XivMitmLatencyMitigator: https://github.com/Soreepeong/XivMitmLatencyMitigator")
+    parser.add_argument("-r", "--region", action="append", dest="region", default=[], choices=("JP", "CN", "KR"),
+                        help="Filters connection by regions. Can be specified multiple times.")
+    parser.add_argument("-e", "--extra-delay", action="store", dest="extra_delay", default=0.075, type=float,
+                        help=EXTRA_DELAY_HELP)
+    parser.add_argument("-m", "--measure-ping", action="store_true", dest="measure_ping", default=False,
+                        help="Use measured latency information from sockets to server and client to adjust extra delay."
+                        )
+    parser.add_argument("-u", "--update-opcodes", action="store_true", dest="update_opcodes", default=False,
+                        help="Download new opcodes again; do not use cached opcodes file.")
+    args: typing.Union[ArgumentTuple, argparse.Namespace] = parser.parse_args()
+
+    if args.extra_delay < 0:
+        logging.warning("Extra delay cannot be a negative number.")
+        return -1
+
+    logging.info(f"Region filter: {', '.join(args.region) if args.region else '(None)'}")
+    logging.info(f"Extra delay: {args.extra_delay}s")
+    logging.info(f"Use measured socket latency: {'yes' if args.measure_ping else 'no'}")
 
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_TCP, socket.TCP_NODELAY, 1)
