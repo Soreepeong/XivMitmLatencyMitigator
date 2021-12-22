@@ -6,22 +6,21 @@ import dataclasses
 import datetime
 import enum
 import ipaddress
+import json
+import logging.handlers
 import math
 import os
 import random
-import select
 import signal
 import socket
 import struct
 import sys
 import time
 import typing
+import urllib.request
 import zlib
 
-import json
-
-import logging.handlers
-import urllib.request
+import select
 
 ACTION_ID_AUTO_ATTACK = 0x0007
 ACTION_ID_AUTO_ATTACK_MCH = 0x0008
