@@ -1119,7 +1119,7 @@ def __main__() -> int:
         os.system(cleanup_filename)
     try:
         with open(cleanup_filename, "w") as fp:
-            fp.write("#!/bin/bash\n")
+            fp.write("#!/bin/sh\n")
             for rule in load_rules(port, definitions):
                 iptables_cmd = f"iptables -t nat -I PREROUTING {rule}"
                 logging.info(f"Running: {iptables_cmd}")
