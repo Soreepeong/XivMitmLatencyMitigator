@@ -1016,33 +1016,35 @@ class Connection:
 
 
 def load_definitions(update_opcodes: bool):
-    try:
-        if update_opcodes:
-            raise RuntimeError("Force update requested")
-        if os.path.getmtime("definitions.json") + 60 * 60 < time.time():
-            raise RuntimeError("Definitions file older than an hour")
-        with open("definitions.json", "r") as fp:
-            definitions = [OpcodeDefinition.from_dict(x) for x in json.load(fp)]
-    except Exception as e:
-        logging.info(f"Failed to read previous opcode definition files: {e}")
-        definitions_raw = []
-
-        logging.info("Downloading opcode definition files...")
+    if os.path.exists("definitions.json"):
         try:
-            with urllib.request.urlopen(OPCODE_DEFINITION_LIST_URL) as resp:
-                filelist = json.load(resp)
+            if update_opcodes:
+                raise RuntimeError("Force update requested")
+            if os.path.getmtime("definitions.json") + 60 * 60 < time.time():
+                raise RuntimeError("Definitions file older than an hour")
+            with open("definitions.json", "r") as fp:
+                return [OpcodeDefinition.from_dict(x) for x in json.load(fp)]
+        except Exception as e:
+            logging.info(f"Failed to read previous opcode definition files: {e}")
 
-            for f in filelist:
-                with urllib.request.urlopen(f["download_url"]) as resp:
-                    data = json.load(resp)
-                data["Name"] = f["name"]
-                definitions_raw.append(data)
-        except Exception:
-            logging.exception(f"Failed to load opcode definition")
-            return -1
-        with open("definitions.json", "w") as fp:
-            json.dump(definitions_raw, fp)
-        definitions = [OpcodeDefinition.from_dict(x) for x in definitions_raw]
+    definitions_raw = []
+    logging.info("Downloading opcode definition files...")
+    try:
+        with urllib.request.urlopen(OPCODE_DEFINITION_LIST_URL) as resp:
+            filelist = json.load(resp)
+
+        for f in filelist:
+            if f["name"][-5:].lower() != '.json':
+                continue
+            with urllib.request.urlopen(f["download_url"]) as resp:
+                data = json.load(resp)
+            data["Name"] = f["name"]
+            definitions_raw.append(data)
+    except Exception as e:
+        raise RuntimeError(f"Failed to load opcode definition") from e
+    with open("definitions.json", "w") as fp:
+        json.dump(definitions_raw, fp)
+    definitions = [OpcodeDefinition.from_dict(x) for x in definitions_raw]
     return definitions
 
 
@@ -1097,8 +1099,10 @@ def __main__() -> int:
     logging.info(f"Use measured socket latency: {'yes' if args.measure_ping else 'no'}")
 
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    listener.setsockopt(socket.SOL_TCP, socket.TCP_NODELAY, 1)
-    listener.setsockopt(socket.SOL_TCP, socket.TCP_QUICKACK, 1)
+    if hasattr(socket, "TCP_NODELAY"):
+        listener.setsockopt(socket.SOL_TCP, socket.TCP_NODELAY, 1)
+    if hasattr(socket, "TCP_QUICKACK"):
+        listener.setsockopt(socket.SOL_TCP, socket.TCP_QUICKACK, 1)
     while True:
         port = random.randint(10000, 65535)
         try:
