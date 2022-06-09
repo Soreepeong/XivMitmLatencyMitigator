@@ -52,8 +52,12 @@ If you're running Windows, you can use [XivAlexander addon](https://github.com/S
 6. Run `iptables -t nat -A POSTROUTING -s <local_ip> -o <device_name> -j MASQUERADE`, replacing:
    * `<device_name>` with the equivalent of `eth0` on above output.
    * `<local_ip>` with the equivalent of `192.168.0.5/24` on above output.
-7. Run `curl https://raw.githubusercontent.com/Soreepeong/XivMitmLatencyMitigator/main/mitigate.py | python`
-8. Configure your gaming device to use the virtual machine to route game traffic, replacing `<vm_ip>` with the equivalent of `192.168.0.5` on above output.
+7. Copy `ffxiv.exe` from your local Windows/Mac game installation into the VM.
+   * Download and run [HFS](https://www.rejetto.com/hfs/?f=dl), and then drag `ffxiv.exe` into its main interface.
+   * You should be able to download that by typing `curl -O ffxiv.exe http://<HFS-IP>/ffxiv.exe`, replacing `<HFS-IP>`
+     with the displayed IP address from HFS.
+8. Run `curl https://raw.githubusercontent.com/Soreepeong/XivMitmLatencyMitigator/main/mitigate.py | python`
+9. Configure your gaming device to use the virtual machine to route game traffic, replacing `<vm_ip>` with the equivalent of `192.168.0.5` on above output.
    * **Windows**: Run a `Command Prompt` as Administrator, and then run the following.
      ```
      route add 204.2.229.0 mask 255.255.255.0 <vm_ip>
@@ -69,9 +73,9 @@ If you're running Windows, you can use [XivAlexander addon](https://github.com/S
      sudo route -n add -net 195.82.50.0/24 <vm_ip>
      ```
    * **PS4**: Set up Static IP ([Guide](https://www.linksys.com/gb/support-article?articleNum=216429)), but use `<vm_ip>` instead for `Default Gateway`.
-9. Run the game and see things get printed in the virtual machine, and if it does, it's working.
-   * ![](img/running.png)
-10. When you're done, you can force quit the virtual machine without "safe" procedures.
+10. Run the game and see things get printed in the virtual machine, and if it does, it's working.
+    * ![](img/running.png)
+11. When you're done, you can force quit the virtual machine without "safe" procedures.
 
 ## License
 Apache License 2.0
