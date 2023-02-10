@@ -5,6 +5,7 @@ import ctypes
 import dataclasses
 import datetime
 import enum
+import io
 import ipaddress
 import json
 import logging.handlers
@@ -18,6 +19,7 @@ import socket
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 import typing
 import urllib.request
@@ -239,7 +241,7 @@ using OodleNetwork1UDP_Train = std::remove_pointer_t<void(STDCALL*)(void* state,
 using OodleNetwork1UDP_Decode = std::remove_pointer_t<bool(STDCALL*)(void* state, void* shared, const void* compressed, size_t compressedSize, void* raw, size_t rawSize)>;
 using OodleNetwork1UDP_Encode = std::remove_pointer_t<int(STDCALL*)(const void* state, const void* shared, const void* raw, size_t rawSize, void* compressed)>;
 using OodleNetwork1UDP_State_Size = std::remove_pointer_t<int(STDCALL*)(void)>;
-using Oodle_Malloc = std::remove_pointer_t<void*(STDCALL*)(size_t size, int align)>;
+using Oodle_Malloc = std::remove_pointer_t<void* (STDCALL*)(size_t size, int align)>;
 using Oodle_Free = std::remove_pointer_t<void(STDCALL*)(void* p)>;
 using Oodle_SetMallocFree = std::remove_pointer_t<void(STDCALL*)(Oodle_Malloc* pfnMalloc, Oodle_Free* pfnFree)>;
 
@@ -339,8 +341,8 @@ int main() {
 	std::vector<const char*> calls;
 	for (auto sig1 = lookup_in_text(
 		&virt[0],
-		"\x83\x7e\x00\x00\x75\x00\x6a\x13\xe8\x00\x00\x00\x00\x6a\x00\x6a\x00\x50\xe8",
-		"\xff\xff\x00\x00\xff\x00\xff\xff\xff\x00\x00\x00\x00\xff\xff\xff\xff\xff\xff",
+		"\x83\x7e\x00\x00\x75\x00\x6a\x00\xe8\x00\x00\x00\x00\x6a\x00\x6a\x00\x50\xe8",
+		"\xff\xff\x00\x00\xff\x00\xff\x00\xff\x00\x00\x00\x00\xff\xff\xff\xff\xff\xff",
 		19), sig2 = sig1 + 1024; calls.size() < 6 && sig1 < sig2; sig1++) {
 		if (*sig1 != (char)0xe8)
 			continue;
@@ -349,14 +351,22 @@ int main() {
 			continue;
 		calls.push_back(pTargetAddress);
 	}
-	if (calls.size() < 6) {
+	if (calls.size() < 5) {
 		std::cerr << "Could not find signature" << std::endl;
 		return -1;
 	}
 	const auto pfnOodleNetwork1_Shared_Size = (OodleNetwork1_Shared_Size*)calls[0];
 	const auto pfnOodleNetwork1_Shared_SetWindow = (OodleNetwork1_Shared_SetWindow*)calls[2];
-	const auto pfnOodleNetwork1UDP_State_Size= (OodleNetwork1UDP_State_Size*)calls[3];
-	const auto pfnOodleNetwork1UDP_Train = (OodleNetwork1UDP_Train*)calls[5];
+	const auto pfnOodleNetwork1UDP_State_Size = (OodleNetwork1UDP_State_Size*)(lookup_in_text(&virt[0],
+		"\xcc\xb8\x00\xb4\x2e\x00",
+		"\xff\xff\xff\xff\xff\xff",
+		6) + 1
+		);
+	const auto pfnOodleNetwork1UDP_Train = (OodleNetwork1UDP_Train*)(lookup_in_text(&virt[0],
+			"\x56\x6a\x08\x68\x00\x84\x4a\x00",
+			"\xff\xff\xff\xff\xff\xff\xff\xff",
+			8)
+		);
 
 	const auto pfnOodleNetwork1UDP_Decode = (OodleNetwork1UDP_Decode*)lookup_in_text(
 		&virt[0],
@@ -364,18 +374,17 @@ int main() {
 		"\xff\xff\xff\xff\xff\xff\xff\xff\x00\xff\xff\xff\xff\xff\xff\xff\x00\xff\xff",
 		19);
 
-	const auto cpfnOodleNetwork1UDP_Encode = lookup_in_text(
+	const auto pfnOodleNetwork1UDP_Encode = (OodleNetwork1UDP_Encode*)lookup_in_text(
 		&virt[0],
-		"\x57\xff\x15\x00\x00\x00\x00\xff\x75\x08\x56\xff\x75\x10\xff\x77\x1c\xff\x77\x18\xe8",
-		"\xff\xff\xff\x00\x00\x00\x00\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff",
-		21) + 20;
-	const auto pfnOodleNetwork1UDP_Encode = (OodleNetwork1UDP_Encode*)(cpfnOodleNetwork1UDP_Encode + 5 + *(int*)(cpfnOodleNetwork1UDP_Encode + 1));
+		"\xff\x74\x24\x14\x8b\x4c\x24\x08\xff\x74\x24\x14\xff\x74\x24\x14\xff\x74\x24\x14\xe8\x00\x00\x00\x00\xc2\x14\x00\xcc\xcc\xcc\xcc\xb8",
+		"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\x00\x00\x00\x00\xff\xff\xff\xff\xff\xff\xff\xff",
+		33);
 
 	int htbits = 19;
 	pfnOodleSetMallocFree(&my_malloc, &my_free);
 	std::vector<uint8_t> state(pfnOodleNetwork1UDP_State_Size());
 	std::vector<uint8_t> shared(pfnOodleNetwork1_Shared_Size(htbits));
-	std::vector<uint8_t> window(0x8000);
+	std::vector<uint8_t> window(0x100000);
 
 	pfnOodleNetwork1_Shared_SetWindow(&shared[0], htbits, &window[0], static_cast<int>(window.size()));
 	pfnOodleNetwork1UDP_Train(&state[0], &shared[0], nullptr, nullptr, 0);
@@ -389,7 +398,8 @@ int main() {
 	if (!pfnOodleNetwork1UDP_Decode(&state[0], &shared[0], &dst[0], dst.size(), &src[0], src.size())) {
 		std::cerr << "Oodle encode/decode test failure" << std::endl;
 		return -1;
-	} else {
+	}
+	else {
 		std::cerr << "Oodle encode test: 256 -> " << dst.size() << std::endl;
 	}
 	for (int i = 0; i < 256; i++) {
@@ -417,7 +427,8 @@ int main() {
 			dst.resize(src.size());
 			dst.resize(pfnOodleNetwork1UDP_Encode(&state[0], &shared[0], &src[0], src.size(), &dst[0]));
 			// std::cerr << "Encoded: res=0x" << dst.size() << std::endl;
-		} else {
+		}
+		else {
 			dst.resize(hdr.TargetLength);
 			if (!pfnOodleNetwork1UDP_Decode(&state[0], &shared[0], &src[0], src.size(), &dst[0], dst.size())) {
 				dst.resize(0);
@@ -443,6 +454,150 @@ class InvalidDataException(ValueError):
 
 class RootRequiredError(RuntimeError):
     pass
+
+
+class ZiPatchHeader(ctypes.BigEndianStructure):
+    SIGNATURE = b"\x91\x5A\x49\x50\x41\x54\x43\x48\x0d\x0a\x1a\x0a"
+
+    _fields_ = (
+        ("signature", ctypes.c_char * 12),
+    )
+
+    signature: int | ctypes.c_char * 12
+
+
+class ZiPatchChunkHeader(ctypes.BigEndianStructure):
+    _fields_ = (
+        ("size", ctypes.c_uint32),
+        ("type", ctypes.c_char * 4),
+    )
+
+    size: int | ctypes.c_uint32
+    type: bytes | ctypes.c_char * 4
+
+
+class ZiPatchChunkFooter(ctypes.BigEndianStructure):
+    _fields_ = (
+        ("crc32", ctypes.c_uint32),
+    )
+
+    crc32: int | ctypes.c_uint32
+
+
+class ZiPatchSqpackHeader(ctypes.BigEndianStructure):
+    _fields_ = (
+        ("size", ctypes.c_uint32),
+        ("command", ctypes.c_char * 4),
+    )
+
+    size: int | ctypes.c_uint32
+    command: bytes | ctypes.c_char * 4
+
+
+class ZiPatchSqpackFileAddHeader(ctypes.BigEndianStructure):
+    COMMAND = b'FA'
+
+    _fields_ = (
+        ("offset", ctypes.c_uint64),
+        ("size", ctypes.c_uint64),
+        ("path_size", ctypes.c_uint32),
+        ("expac_id", ctypes.c_uint16),
+        ("padding1", ctypes.c_uint16),
+    )
+
+    offset: int | ctypes.c_uint16
+    size: int | ctypes.c_uint64
+    path_size: int | ctypes.c_uint32
+    expac_id: int | ctypes.c_uint16
+    padding1: int | ctypes.c_uint16
+
+
+class ZiPatchSqpackFileDeleteHeader(ctypes.BigEndianStructure):
+    COMMAND = b'FD'
+
+    _fields_ = (
+        ("offset", ctypes.c_uint64),
+        ("size", ctypes.c_uint64),
+        ("path_size", ctypes.c_uint32),
+        ("expac_id", ctypes.c_uint16),
+        ("padding1", ctypes.c_uint16),
+    )
+
+    offset: int | ctypes.c_uint16
+    size: int | ctypes.c_uint64
+    path_size: int | ctypes.c_uint32
+    expac_id: int | ctypes.c_uint16
+    padding1: int | ctypes.c_uint16
+
+
+class ZiPatchSqpackFileResolver(ctypes.BigEndianStructure):
+    _fields_ = (
+        ("main_id", ctypes.c_uint16),
+        ("sub_id", ctypes.c_uint16),
+        ("file_id", ctypes.c_uint32),
+    )
+
+    main_id: int | ctypes.c_uint16
+    sub_id: int | ctypes.c_uint16
+    file_id: int | ctypes.c_uint32
+
+    @property
+    def expac_id(self):
+        return self.sub_id >> 8
+
+    @property
+    def path(self):
+        if self.expac_id == 0:
+            return f"sqpack/ffxiv/{self.main_id:02x}{self.sub_id:04x}.win32"
+        else:
+            return f"sqpack/ex{self.expac_id}/{self.main_id:02x}{self.sub_id:04x}.win32"
+
+
+class ZiPatchSqpackAddData(ZiPatchSqpackFileResolver):
+    COMMAND = b'A'
+
+    _fields_ = (
+        ("block_offset_value", ctypes.c_uint32),
+        ("block_size_value", ctypes.c_uint32),
+        ("clear_size_value", ctypes.c_uint32),
+    )
+
+    @property
+    def block_offset(self):
+        return self.block_offset_value * 128
+
+    @property
+    def block_size(self):
+        return self.block_size_value * 128
+
+    @property
+    def clear_size(self):
+        return self.clear_size_value * 128
+
+    @property
+    def path(self):
+        return super().path + f".dat{self.file_id}"
+
+
+class ZiPatchSqpackZeroData(ZiPatchSqpackFileResolver):
+    COMMANDS = {b'E', b'D'}
+
+    _fields_ = (
+        ("block_offset_value", ctypes.c_uint32),
+        ("block_size_value", ctypes.c_uint32),
+    )
+
+    @property
+    def block_offset(self):
+        return self.block_offset_value * 128
+
+    @property
+    def block_size(self):
+        return self.block_size_value * 128
+
+    @property
+    def path(self):
+        return super().path + f".dat{self.file_id}"
 
 
 class TcpInfo(ctypes.Structure):
@@ -941,7 +1096,7 @@ class OpcodeDefinition:
     S2C_ActorControl: int
     S2C_ActorControlSelf: int
     Server_IpRange: typing.List[typing.Union[ipaddress.IPv4Network,
-                                             typing.Tuple[ipaddress.IPv4Address, ipaddress.IPv4Address]]]
+    typing.Tuple[ipaddress.IPv4Address, ipaddress.IPv4Address]]]
     Server_PortRange: typing.List[typing.Tuple[int, int]]
 
     @classmethod
@@ -1523,6 +1678,100 @@ def load_rules(port: int, definitions: typing.List[OpcodeDefinition]) -> typing.
     return rules
 
 
+class BlockHeader(ctypes.LittleEndianStructure):
+    COMPRESSED_SIZE_NOT_COMPRESSED = 32000
+
+    _fields_ = (
+        ("header_length", ctypes.c_uint32),
+        ("version", ctypes.c_uint32),
+        ("compressed_size", ctypes.c_uint32),
+        ("decompressed_size", ctypes.c_uint32),
+    )
+
+    header_length: int
+    version: int
+    compressed_size: int
+    decompressed_size: int
+
+    data: typing.Optional[bytes] = None
+
+    def is_compressed(self):
+        return self.compressed_size != BlockHeader.COMPRESSED_SIZE_NOT_COMPRESSED and self.decompressed_size != 1
+
+
+def download_exe(src_url: str):
+    print("Downloading:", src_url)
+    with urllib.request.urlopen(src_url) as resp:
+        data = resp.read()
+    if data[0:2] == b'MZ':
+        with open("ffxiv.exe", "wb") as fp:
+            fp.write(data)
+        return
+
+    print("Looking for ffxiv.exe in the downloaded patch file...")
+    with io.BytesIO(data) as fp:
+        fp.seek(0, os.SEEK_SET)
+        fp: typing.BinaryIO | io.BytesIO
+        fp.readinto(hdr := ZiPatchHeader())
+        if hdr.signature != ZiPatchHeader.SIGNATURE:
+            raise RuntimeError("downloaded file is neither a .patch file or .exe file")
+
+        ffxiv = []
+
+        while fp.readinto(hdr := ZiPatchChunkHeader()):
+            offset = fp.tell()
+            if hdr.type == b"SQPK":
+                fp.readinto(sqpkhdr := ZiPatchSqpackHeader())
+                if sqpkhdr.command in (b"T", b"X"):
+                    pass
+
+                elif sqpkhdr.command == ZiPatchSqpackFileAddHeader.COMMAND:
+                    fp.readinto(sqpkhdr2 := ZiPatchSqpackFileAddHeader())
+                    path = fp.read(sqpkhdr2.path_size).split(b"\0", 1)[0].decode("utf-8")
+                    is_target_file = path == 'ffxiv.exe'
+
+                    current_file_offset = sqpkhdr2.offset
+                    while fp.tell() < offset + hdr.size:
+                        fp.readinto(block_header := BlockHeader())
+                        block_data_size = block_header.compressed_size if block_header.is_compressed() else block_header.decompressed_size
+                        padded_block_size = (block_data_size + ctypes.sizeof(block_header) + 127) & 0xFFFFFF80
+                        if is_target_file:
+                            x = fp.read(padded_block_size - ctypes.sizeof(block_header))[:block_data_size]
+                            if block_header.is_compressed():
+                                x = zlib.decompress(x, -zlib.MAX_WBITS)
+                            if len(x) != block_header.decompressed_size:
+                                raise RuntimeError("Corrupt patch file")
+                            ffxiv.append(x)
+                        else:
+                            fp.seek(padded_block_size - ctypes.sizeof(block_header), os.SEEK_CUR)
+                        current_file_offset += block_header.decompressed_size
+
+                elif sqpkhdr.command == ZiPatchSqpackFileDeleteHeader.COMMAND:
+                    fp.readinto(sqpkhdr2 := ZiPatchSqpackFileDeleteHeader())
+                    fp.seek(sqpkhdr2.path_size, io.SEEK_CUR)
+
+                elif sqpkhdr.command == ZiPatchSqpackAddData.COMMAND:
+                    fp.readinto(sqpkhdr2 := ZiPatchSqpackAddData())
+
+                elif sqpkhdr.command in ZiPatchSqpackZeroData.COMMANDS:
+                    fp.readinto(sqpkhdr2 := ZiPatchSqpackZeroData())
+
+                elif sqpkhdr.command in {b'HDV', b'HDI', b'HDD', b'HIV', b'HII', b'HID'}:
+                    fp.readinto(sqpkhdr2 := ZiPatchSqpackFileResolver())
+
+            fp.seek(offset + hdr.size, os.SEEK_SET)
+            fp.readinto(ZiPatchChunkFooter())
+            if hdr.type == b"EOF_":
+                break
+
+    if ffxiv:
+        with open("ffxiv.exe", "wb") as fp:
+            fp.writelines(ffxiv)
+        return
+
+    raise RuntimeError("downloaded patch file does not contain a .exe file")
+
+
 def __main__() -> int:
     if sys.version_info < (3, 8):
         print("This script requires at least python 3.8")
@@ -1544,11 +1793,16 @@ def __main__() -> int:
                         )
     parser.add_argument("-u", "--update-opcodes", action="store_true", dest="update_opcodes", default=False,
                         help="Download new opcodes again; do not use cached opcodes file.")
+    parser.add_argument("-x", "--exe", action="store", type=str, dest="exe_url", default="",
+                        help="Download ffxiv.exe from specified URL (exe or patch file.)")
     args: typing.Union[ArgumentTuple, argparse.Namespace] = parser.parse_args()
 
     if args.extra_delay < 0:
         logging.warning("Extra delay cannot be a negative number.")
         return -1
+
+    if args.exe_url != '':
+        download_exe(args.exe_url)
 
     logging.info(f"Region filter: {', '.join(args.region) if args.region else '(None)'}")
     logging.info(f"Extra delay: {args.extra_delay}s")

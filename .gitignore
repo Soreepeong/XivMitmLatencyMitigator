@@ -1,4 +1,8 @@
-/definitions.json
+definitions.json
 
-# If it becomes an actual IDEA project, then remove the following line.
+ffxiv.exe
+Debug
+x64
+.vcxproj.user
 .idea
+.vs
