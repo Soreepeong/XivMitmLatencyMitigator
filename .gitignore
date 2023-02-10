@@ -1,6 +1,7 @@
 definitions.json
 
 ffxiv.exe
+ffxiv_dx11.exe
 Debug
 x64
 .vcxproj.user
