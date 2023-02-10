@@ -463,7 +463,7 @@ class ZiPatchHeader(ctypes.BigEndianStructure):
         ("signature", ctypes.c_char * 12),
     )
 
-    signature: int | ctypes.c_char * 12
+    signature: typing.Union[int, ctypes.c_char * 12]
 
 
 class ZiPatchChunkHeader(ctypes.BigEndianStructure):
@@ -472,8 +472,8 @@ class ZiPatchChunkHeader(ctypes.BigEndianStructure):
         ("type", ctypes.c_char * 4),
     )
 
-    size: int | ctypes.c_uint32
-    type: bytes | ctypes.c_char * 4
+    size: typing.Union[int, ctypes.c_uint32]
+    type: typing.Union[bytes, ctypes.c_char * 4]
 
 
 class ZiPatchChunkFooter(ctypes.BigEndianStructure):
@@ -481,7 +481,7 @@ class ZiPatchChunkFooter(ctypes.BigEndianStructure):
         ("crc32", ctypes.c_uint32),
     )
 
-    crc32: int | ctypes.c_uint32
+    crc32: typing.Union[int, ctypes.c_uint32]
 
 
 class ZiPatchSqpackHeader(ctypes.BigEndianStructure):
@@ -490,8 +490,8 @@ class ZiPatchSqpackHeader(ctypes.BigEndianStructure):
         ("command", ctypes.c_char * 4),
     )
 
-    size: int | ctypes.c_uint32
-    command: bytes | ctypes.c_char * 4
+    size: typing.Union[int, ctypes.c_uint32]
+    command: typing.Union[bytes, ctypes.c_char * 4]
 
 
 class ZiPatchSqpackFileAddHeader(ctypes.BigEndianStructure):
@@ -505,11 +505,11 @@ class ZiPatchSqpackFileAddHeader(ctypes.BigEndianStructure):
         ("padding1", ctypes.c_uint16),
     )
 
-    offset: int | ctypes.c_uint16
-    size: int | ctypes.c_uint64
-    path_size: int | ctypes.c_uint32
-    expac_id: int | ctypes.c_uint16
-    padding1: int | ctypes.c_uint16
+    offset: typing.Union[int, ctypes.c_uint16]
+    size: typing.Union[int, ctypes.c_uint64]
+    path_size: typing.Union[int, ctypes.c_uint32]
+    expac_id: typing.Union[int, ctypes.c_uint16]
+    padding1: typing.Union[int, ctypes.c_uint16]
 
 
 class ZiPatchSqpackFileDeleteHeader(ctypes.BigEndianStructure):
@@ -523,11 +523,11 @@ class ZiPatchSqpackFileDeleteHeader(ctypes.BigEndianStructure):
         ("padding1", ctypes.c_uint16),
     )
 
-    offset: int | ctypes.c_uint16
-    size: int | ctypes.c_uint64
-    path_size: int | ctypes.c_uint32
-    expac_id: int | ctypes.c_uint16
-    padding1: int | ctypes.c_uint16
+    offset: typing.Union[int, ctypes.c_uint16]
+    size: typing.Union[int, ctypes.c_uint64]
+    path_size: typing.Union[int, ctypes.c_uint32]
+    expac_id: typing.Union[int, ctypes.c_uint16]
+    padding1: typing.Union[int, ctypes.c_uint16]
 
 
 class ZiPatchSqpackFileResolver(ctypes.BigEndianStructure):
@@ -537,9 +537,9 @@ class ZiPatchSqpackFileResolver(ctypes.BigEndianStructure):
         ("file_id", ctypes.c_uint32),
     )
 
-    main_id: int | ctypes.c_uint16
-    sub_id: int | ctypes.c_uint16
-    file_id: int | ctypes.c_uint32
+    main_id: typing.Union[int, ctypes.c_uint16]
+    sub_id: typing.Union[int, ctypes.c_uint16]
+    file_id: typing.Union[int, ctypes.c_uint32]
 
     @property
     def expac_id(self):
@@ -1711,7 +1711,7 @@ def download_exe(src_url: str):
     print("Looking for ffxiv.exe in the downloaded patch file...")
     with io.BytesIO(data) as fp:
         fp.seek(0, os.SEEK_SET)
-        fp: typing.BinaryIO | io.BytesIO
+        fp: typing.Union[typing.BinaryIO, io.BytesIO]
         fp.readinto(hdr := ZiPatchHeader())
         if hdr.signature != ZiPatchHeader.SIGNATURE:
             raise RuntimeError("downloaded file is neither a .patch file or .exe file")
