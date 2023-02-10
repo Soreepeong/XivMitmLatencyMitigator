@@ -1,4 +1,4 @@
-import ctypes
+import ctypes.util
 import os
 import pathlib
 import re
@@ -290,10 +290,14 @@ def allocate_executable_memory(length: int):
 POINTER_SIZE = ctypes.sizeof(ctypes.c_void_p)
 if os.name == 'nt':
     crt_malloc = ctypes.cdll.msvcrt.malloc
-    crt_malloc.argtypes = (ctypes.c_size_t,)
-    crt_malloc.restype = ctypes.c_size_t
     crt_free = ctypes.cdll.msvcrt.free
-    crt_free.argtypes = (ctypes.c_size_t,)
+else:
+    libc = ctypes.CDLL(ctypes.util.find_library("c"))
+    crt_malloc = libc.malloc
+    crt_free = libc.free
+crt_malloc.argtypes = (ctypes.c_size_t,)
+crt_malloc.restype = ctypes.c_size_t
+crt_free.argtypes = (ctypes.c_size_t,)
 
 PyMemoryView_FromMemory = ctypes.pythonapi.PyMemoryView_FromMemory
 PyMemoryView_FromMemory.argtypes = (ctypes.c_void_p, ctypes.c_ssize_t, ctypes.c_int)
@@ -338,7 +342,11 @@ class PeImage:
             self._data, self.dos.e_lfanew + ctypes.sizeof(self.nt))
 
         self.address: ctypes.c_void_p = allocate_executable_memory(self.nt.OptionalHeader.SizeOfImage)
-        self.view = PyMemoryView_FromMemory(self.address, self.nt.OptionalHeader.SizeOfImage, 0x200)  # Read/Write
+        self.view: memoryview = PyMemoryView_FromMemory(
+            self.address,
+            self.nt.OptionalHeader.SizeOfImage,
+            0x200,  # Read/Write
+        )
 
         self._map_headers_and_sections()
         self._relocate()
@@ -403,12 +411,9 @@ class Oodle:
         raise NotImplementedError
     _OodleNetwork1_Shared_Size = _FT(ctypes.c_int32, ctypes.c_int32)
     _OodleNetwork1_Shared_SetWindow = _FT(None, ctypes.c_void_p, ctypes.c_int32, ctypes.c_void_p, ctypes.c_int32)
-    _OodleNetwork1UDP_Train = _FT(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p),
-                                  ctypes.POINTER(ctypes.c_int32), ctypes.c_int32)
-    _OodleNetwork1UDP_Decode = _FT(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t,
-                                   ctypes.c_void_p, ctypes.c_size_t)
-    _OodleNetwork1UDP_Encode = _FT(ctypes.c_int32, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t,
-                                   ctypes.c_void_p)
+    _OodleNetwork1UDP_Train = _FT(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_int32), ctypes.c_int32)
+    _OodleNetwork1UDP_Decode = _FT(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p, ctypes.c_size_t)
+    _OodleNetwork1UDP_Encode = _FT(ctypes.c_int32, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p)
     _OodleNetwork1UDP_State_Size = _FT(ctypes.c_int32)
     _Oodle_Malloc = _FT(ctypes.c_size_t, ctypes.c_size_t, ctypes.c_int32)
     _Oodle_Free = _FT(None, ctypes.c_size_t)
