@@ -1,6 +1,7 @@
 #!/usr/bin/sudo python
 import argparse
 import collections
+import contextlib
 import ctypes
 import dataclasses
 import datetime
@@ -19,7 +20,6 @@ import socket
 import struct
 import subprocess
 import sys
-import tempfile
 import time
 import typing
 import urllib.request
@@ -42,12 +42,14 @@ Feel free to increase and see how does it feel like to play on high latency inst
 T = typing.TypeVar("T")
 ArgumentTuple = collections.namedtuple("ArgumentTuple", ("region", "extra_delay", "measure_ping", "update_opcodes"))
 
-OODLE_HELPER_CODE = r"""
-#define _CRT_SECURE_NO_WARNINGS
+OODLE_HELPER_CODE = r"""#define _CRT_SECURE_NO_WARNINGS
 
+#include <cstdio>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <span>
+#include <regex>
 #include <type_traits>
 #include <vector>
 
@@ -235,16 +237,6 @@ using IMAGE_NT_HEADERS = IMAGE_NT_HEADERS_SIZED<IMAGE_OPTIONAL_HEADER32>;
 
 #endif
 
-using OodleNetwork1_Shared_Size = std::remove_pointer_t<int(STDCALL*)(int htbits)>;
-using OodleNetwork1_Shared_SetWindow = std::remove_pointer_t<void(STDCALL*)(void* data, int htbits, void* window, int windowSize)>;
-using OodleNetwork1UDP_Train = std::remove_pointer_t<void(STDCALL*)(void* state, void* shared, const void* const* trainingPacketPointers, const int* trainingPacketSizes, int trainingPacketCount)>;
-using OodleNetwork1UDP_Decode = std::remove_pointer_t<bool(STDCALL*)(void* state, void* shared, const void* compressed, size_t compressedSize, void* raw, size_t rawSize)>;
-using OodleNetwork1UDP_Encode = std::remove_pointer_t<int(STDCALL*)(const void* state, const void* shared, const void* raw, size_t rawSize, void* compressed)>;
-using OodleNetwork1UDP_State_Size = std::remove_pointer_t<int(STDCALL*)(void)>;
-using Oodle_Malloc = std::remove_pointer_t<void* (STDCALL*)(size_t size, int align)>;
-using Oodle_Free = std::remove_pointer_t<void(STDCALL*)(void* p)>;
-using Oodle_SetMallocFree = std::remove_pointer_t<void(STDCALL*)(Oodle_Malloc* pfnMalloc, Oodle_Free* pfnFree)>;
-
 void* STDCALL my_malloc(size_t size, int align) {
 	const auto pRaw = (char*)malloc(size + align + sizeof(void*) - 1);
 	if (!pRaw)
@@ -259,50 +251,276 @@ void STDCALL my_free(void* p) {
 	free(*((void**)p - 1));
 }
 
-const char* lookup_in_text(const char* pBaseAddress, const char* sPattern, const char* sMask, size_t length) {
-	std::vector<void*> result;
-	const std::string_view mask(sMask, length);
-	const std::string_view pattern(sPattern, length);
+using OodleNetwork1_Shared_Size = std::remove_pointer_t<int(STDCALL*)(int htbits)>;
+using OodleNetwork1_Shared_SetWindow = std::remove_pointer_t<void(STDCALL*)(void* data, int htbits, void* window, int windowSize)>;
+using OodleNetwork1_Proto_Train = std::remove_pointer_t<void(STDCALL*)(void* state, void* shared, const void* const* trainingPacketPointers, const int* trainingPacketSizes, int trainingPacketCount)>;
+using OodleNetwork1_Proto_State_Size = std::remove_pointer_t<int(STDCALL*)(void)>;
+using OodleNetwork1_UDP_Decode = std::remove_pointer_t<bool(STDCALL*)(const void* state, void* shared, const void* compressed, size_t compressedSize, void* raw, size_t rawSize)>;
+using OodleNetwork1_UDP_Encode = std::remove_pointer_t<int(STDCALL*)(const void* state, const void* shared, const void* raw, size_t rawSize, void* compressed)>;
+using OodleNetwork1_TCP_Decode = std::remove_pointer_t<bool(STDCALL*)(void* state, void* shared, const void* compressed, size_t compressedSize, void* raw, size_t rawSize)>;
+using OodleNetwork1_TCP_Encode = std::remove_pointer_t<int(STDCALL*)(void* state, const void* shared, const void* raw, size_t rawSize, void* compressed)>;
+using Oodle_Malloc = std::remove_pointer_t<void* (STDCALL*)(size_t size, int align)>;
+using Oodle_Free = std::remove_pointer_t<void(STDCALL*)(void* p)>;
+using Oodle_SetMallocFree = std::remove_pointer_t<void(STDCALL*)(Oodle_Malloc* pfnMalloc, Oodle_Free* pfnFree)>;
 
-	const auto& dosh = *(IMAGE_DOS_HEADER*)(&pBaseAddress[0]);
-	const auto& nth = *(IMAGE_NT_HEADERS*)(&pBaseAddress[dosh.e_lfanew]);
+class ScanResult {
+	std::cmatch m_match;
 
-	const auto pSectionHeaders = IMAGE_FIRST_SECTION(&nth);
-	for (size_t i = 0; i < nth.FileHeader.NumberOfSections; ++i) {
-		if (strncmp(pSectionHeaders[i].Name, ".text", 8) == 0) {
-			std::string_view section(pBaseAddress + pSectionHeaders[i].VirtualAddress, pSectionHeaders[i].Misc.VirtualSize);
-			const auto nUpperLimit = section.length() - pattern.length();
-			for (size_t i = 0; i < nUpperLimit; ++i) {
-				for (size_t j = 0; j < pattern.length(); ++j) {
-					if ((section[i + j] & mask[j]) != (pattern[j] & mask[j]))
-						goto next_char;
-				}
-				return section.data() + i;
-			next_char:;
-			}
-		}
+public:
+	ScanResult() = default;
+	ScanResult(const ScanResult&) = default;
+	ScanResult(ScanResult&&) noexcept = default;
+	ScanResult& operator=(const ScanResult&) = default;
+	ScanResult& operator=(ScanResult&&) noexcept = default;
+
+	ScanResult(std::cmatch match)
+		: m_match(std::move(match)) {
 	}
-	std::cerr << "Could not find signature" << std::endl;
-	exit(-1);
-	return nullptr;
+
+	template<typename T>
+	T& Get(size_t matchIndex) const {
+		return *reinterpret_cast<T*>(const_cast<void*>(static_cast<const void*>(m_match[matchIndex].first)));
+	}
+
+	template<typename T>
+	T* ResolveAddress(size_t matchIndex) const {
+		return reinterpret_cast<T*>(m_match[matchIndex].first + 4 + Get<int32_t>(matchIndex));
+	}
+
+	template<typename T = void>
+	T* begin(size_t matchIndex) {
+		return reinterpret_cast<T*>(const_cast<void*>(static_cast<const void*>(&*m_match[matchIndex].first)));
+	}
+
+	template<typename T = void>
+	void* end(size_t matchIndex) {
+		return reinterpret_cast<T*>(const_cast<void*>(static_cast<const void*>(&*m_match[matchIndex].second)));
+	}
+};
+
+class RegexSignature {
+	const std::regex m_pattern;
+
+public:
+	template<size_t Length>
+	RegexSignature(const char(&data)[Length])
+		: m_pattern{ data, data + Length - 1 } {
+	}
+
+	bool Lookup(const void* data, size_t length, ScanResult& result, bool next = false) const {
+		std::cmatch match;
+
+		if (next) {
+			const auto end = static_cast<const char*>(data) + length;
+			const auto prevEnd = result.end(0);
+			if (prevEnd >= end)
+				return false;
+			data = prevEnd;
+		}
+
+		if (!std::regex_search(static_cast<const char*>(data), static_cast<const char*>(data) + length, match, m_pattern))
+			return false;
+
+		result = ScanResult(std::move(match));
+		return true;
+	}
+
+	template<typename T>
+	bool Lookup(std::span<T> data, ScanResult& result, bool next = false) const {
+		return Lookup(data.data(), data.size_bytes(), result, next);
+	}
+};
+
+template<typename T>
+void DisplaceBy(T*& what, size_t offset) {
+	what = reinterpret_cast<T*>(reinterpret_cast<char*>(what) + offset);
 }
 
+struct OodleXiv {
+	int HtBits;
+	int Window;
+	void* BaseAddress;
+	OodleNetwork1_Shared_Size* SharedSize;
+	Oodle_SetMallocFree* SetMallocFree;
+	OodleNetwork1_Shared_SetWindow* SharedSetWindow;
+	OodleNetwork1_Proto_State_Size* UdpStateSize;
+	OodleNetwork1_Proto_State_Size* TcpStateSize;
+	OodleNetwork1_Proto_Train* TcpTrain;
+	OodleNetwork1_Proto_Train* UdpTrain;
+	OodleNetwork1_TCP_Decode* TcpDecode;
+	OodleNetwork1_UDP_Decode* UdpDecode;
+	OodleNetwork1_TCP_Encode* TcpEncode;
+	OodleNetwork1_UDP_Encode* UdpEncode;
+	bool Ready = false;
+
+	bool Lookup(std::span<char> virt) {
+		if (Ready) {
+			if (BaseAddress != virt.data()) {
+				const auto displacement = reinterpret_cast<intptr_t>(virt.data()) - reinterpret_cast<intptr_t>(BaseAddress);
+				BaseAddress = virt.data();
+
+				DisplaceBy(SharedSize, displacement);
+				DisplaceBy(SetMallocFree, displacement);
+				DisplaceBy(SharedSetWindow, displacement);
+				DisplaceBy(UdpStateSize, displacement);
+				DisplaceBy(TcpStateSize, displacement);
+				DisplaceBy(TcpTrain, displacement);
+				DisplaceBy(UdpTrain, displacement);
+				DisplaceBy(TcpDecode, displacement);
+				DisplaceBy(UdpDecode, displacement);
+				DisplaceBy(TcpEncode, displacement);
+				DisplaceBy(UdpEncode, displacement);
+			}
+			return true;
+		}
+
+#ifdef _WIN64
+		const auto InitOodle = RegexSignature(R"(\x75[\s\S]\x48\x8d\x15[\s\S][\s\S][\s\S][\s\S]\x48\x8d\x0d[\s\S][\s\S][\s\S][\s\S]\xe8([\s\S][\s\S][\s\S][\s\S])\xc6\x05[\s\S][\s\S][\s\S][\s\S]\x01[\s\S]{0,256}\x75[\s\S]\xb9([\s\S][\s\S][\s\S][\s\S])\xe8([\s\S][\s\S][\s\S][\s\S])\x45\x33\xc0\x33\xd2\x48\x8b\xc8\xe8[\s\S][\s\S][\s\S][\s\S][\s\S]{0,6}\x41\xb9([\s\S][\s\S][\s\S][\s\S])\xba[\s\S][\s\S][\s\S][\s\S][\s\S]{0,6}\x48\x8b\xc8\xe8([\s\S][\s\S][\s\S][\s\S]))");
+#else
+		const auto InitOodle = RegexSignature(R"(\x75\x16\x68[\s\S][\s\S][\s\S][\s\S]\x68[\s\S][\s\S][\s\S][\s\S]\xe8([\s\S][\s\S][\s\S][\s\S])\xc6\x05[\s\S][\s\S][\s\S][\s\S]\x01[\s\S]{0,256}\x75\x27\x6a([\s\S])\xe8([\s\S][\s\S][\s\S][\s\S])\x6a\x00\x6a\x00\x50\xe8[\s\S][\s\S][\s\S][\s\S]\x83\xc4[\s\S]\x89\x46[\s\S]\x68([\s\S][\s\S][\s\S][\s\S])\xff\x76[\s\S]\x6a[\s\S]\x50\xe8([\s\S][\s\S][\s\S][\s\S]))");
+#endif
+		if (ScanResult sr; InitOodle.Lookup(virt, sr)) {
+			SetMallocFree = sr.ResolveAddress<Oodle_SetMallocFree>(1);
+			HtBits = sr.Get<uint8_t>(2);
+			SharedSize = sr.ResolveAddress<OodleNetwork1_Shared_Size>(3);
+			Window = sr.Get<uint32_t>(4);
+			SharedSetWindow = sr.ResolveAddress<OodleNetwork1_Shared_SetWindow>(5);
+		} else
+			return false;
+
+#ifdef _WIN64
+		const auto SetUpStatesAndTrain = RegexSignature(R"(\x75\x04\x48\x89\x7e[\s\S]\xe8([\s\S][\s\S][\s\S][\s\S])\x4c[\s\S][\s\S]\xe8([\s\S][\s\S][\s\S][\s\S])[\s\S]{0,256}\x01\x75\x0a\x48\x8b\x0f\xe8([\s\S][\s\S][\s\S][\s\S])\xeb\x09\x48\x8b\x4f\x08\xe8([\s\S][\s\S][\s\S][\s\S]))");
+#else
+		const auto SetUpStatesAndTrain = RegexSignature(R"(\xe8([\s\S][\s\S][\s\S][\s\S])\x8b\xd8\xe8([\s\S][\s\S][\s\S][\s\S])\x83\x7d\x10\x01[\s\S]{0,256}\x83\x7d\x10\x01\x6a\x00\x6a\x00\x6a\x00\xff\x77[\s\S]\x75\x09\xff[\s\S]\xe8([\s\S][\s\S][\s\S][\s\S])\xeb\x08\xff\x76[\s\S]\xe8([\s\S][\s\S][\s\S][\s\S]))");
+#endif
+		if (ScanResult sr; SetUpStatesAndTrain.Lookup(virt, sr)) {
+			UdpStateSize = sr.ResolveAddress<OodleNetwork1_Proto_State_Size>(1);
+			TcpStateSize = sr.ResolveAddress<OodleNetwork1_Proto_State_Size>(2);
+			TcpTrain = sr.ResolveAddress<OodleNetwork1_Proto_Train>(3);
+			UdpTrain = sr.ResolveAddress<OodleNetwork1_Proto_Train>(4);
+		} else
+			return false;
+
+#ifdef _WIN64
+		const auto DecodeOodle = RegexSignature(R"(\x4d\x85\xd2\x74\x0a\x49\x8b\xca\xe8([\s\S][\s\S][\s\S][\s\S])\xeb\x09\x48\x8b\x49\x08\xe8([\s\S][\s\S][\s\S][\s\S]))");
+		const auto EncodeOodle = RegexSignature(R"(\x48\x85\xc0\x74\x0d\x48\x8b\xc8\xe8([\s\S][\s\S][\s\S][\s\S])\x48[\s\S][\s\S]\xeb\x0b\x48\x8b\x49\x08\xe8([\s\S][\s\S][\s\S][\s\S]))");
+		if (ScanResult sr1, sr2; DecodeOodle.Lookup(virt, sr1) && EncodeOodle.Lookup(virt, sr2)) {
+			TcpDecode = sr1.ResolveAddress<OodleNetwork1_TCP_Decode>(1);
+			UdpDecode = sr1.ResolveAddress<OodleNetwork1_UDP_Decode>(2);
+			TcpEncode = sr2.ResolveAddress<OodleNetwork1_TCP_Encode>(1);
+			UdpEncode = sr2.ResolveAddress<OodleNetwork1_UDP_Encode>(2);
+		} else
+			return false;
+#else
+		const auto TcpCodecOodle = RegexSignature(R"(\x85\xc0\x74[\s\S]\x50\xe8([\s\S][\s\S][\s\S][\s\S])\x57\x8b\xf0\xff\x15)");
+		const auto UdpCodecOodle = RegexSignature(R"(\xff\x71\x04\xe8([\s\S][\s\S][\s\S][\s\S])\x57\x8b\xf0\xff\x15)");
+		if (ScanResult sr1, sr2; TcpCodecOodle.Lookup(virt, sr1) && UdpCodecOodle.Lookup(virt, sr2)) {
+			TcpEncode = sr1.ResolveAddress<OodleNetwork1_TCP_Encode>(1);
+			UdpEncode = sr2.ResolveAddress<OodleNetwork1_UDP_Encode>(1);
+			// NOTE: compressed buffer size must be (8 + input.size)
+
+			if (TcpCodecOodle.Lookup(virt, sr1, true) && UdpCodecOodle.Lookup(virt, sr2, true)) {
+				TcpDecode = sr1.ResolveAddress<OodleNetwork1_TCP_Decode>(1);
+				UdpDecode = sr2.ResolveAddress<OodleNetwork1_UDP_Decode>(1);
+			} else
+				return false;
+		} else
+			return false;
+#endif
+
+		BaseAddress = virt.data();
+		Ready = true;
+		return true;
+	}
+};
+
+class Oodle {
+	OodleXiv m_oodleXiv;
+
+	std::vector<uint8_t> m_shared;
+	std::vector<uint8_t> m_state;
+	std::vector<uint8_t> m_window;
+
+	bool m_isTcp{};
+
+public:
+	Oodle() = default;
+	Oodle(Oodle&&) noexcept = default;
+	Oodle(const Oodle&) = delete;
+	Oodle& operator=(Oodle&&) noexcept = default;
+	Oodle& operator=(const Oodle&) = delete;
+
+	void SetupUdp(const OodleXiv& oodleXiv) {
+		m_oodleXiv = oodleXiv;
+		m_isTcp = false;
+
+		m_shared.clear();
+		m_state.clear();
+		m_window.clear();
+		m_shared.resize(m_oodleXiv.SharedSize(m_oodleXiv.HtBits));
+		m_state.resize(m_oodleXiv.UdpStateSize());
+		m_window.resize(m_oodleXiv.Window);
+
+		m_oodleXiv.SharedSetWindow(&m_shared[0], m_oodleXiv.HtBits, &m_window[0], m_oodleXiv.Window);
+		m_oodleXiv.UdpTrain(&m_state[0], &m_shared[0], nullptr, nullptr, 0);
+	}
+
+	void SetupTcp(const OodleXiv& oodleXiv) {
+		m_oodleXiv = oodleXiv;
+		m_isTcp = true;
+
+		m_shared.clear();
+		m_state.clear();
+		m_window.clear();
+		m_shared.resize(m_oodleXiv.SharedSize(m_oodleXiv.HtBits));
+		m_state.resize(m_oodleXiv.TcpStateSize());
+		m_window.resize(m_oodleXiv.Window);
+
+		m_oodleXiv.SharedSetWindow(&m_shared[0], m_oodleXiv.HtBits, &m_window[0], m_oodleXiv.Window);
+		m_oodleXiv.TcpTrain(&m_state[0], &m_shared[0], nullptr, nullptr, 0);
+	}
+
+	size_t Encode(const void* source, size_t sourceLength, void* target, size_t targetLength) {
+		if (targetLength < CompressedBufferSizeNeeded(sourceLength))
+			return (std::numeric_limits<size_t>::max)();
+
+		if (m_isTcp)
+			return m_oodleXiv.TcpEncode(m_state.data(), m_shared.data(), source, sourceLength, target);
+		else
+			return m_oodleXiv.UdpEncode(m_state.data(), m_shared.data(), source, sourceLength, target);
+	}
+
+	size_t Decode(const void* source, size_t sourceLength, void* target, size_t targetLength) {
+		if (m_isTcp)
+			return m_oodleXiv.TcpDecode(m_state.data(), m_shared.data(), source, sourceLength, target, targetLength);
+		else
+			return m_oodleXiv.UdpDecode(m_state.data(), m_shared.data(), source, sourceLength, target, targetLength);
+	}
+
+	static size_t CompressedBufferSizeNeeded(size_t n) {
+		return n + 8;
+	}
+};
+
 int main() {
-	std::cerr << std::hex;
 	freopen(NULL, "rb", stdin);
 	freopen(NULL, "wb", stdout);
 
 	std::ifstream game(GamePath, std::ios::binary);
 	game.seekg(0, std::ios::end);
-	std::vector<char> buf((size_t)game.tellg());
+	std::vector<char> buf((static_cast<size_t>(game.tellg()) + 3) / 4 * 4);
 	game.seekg(0, std::ios::beg);
 	game.read(&buf[0], buf.size());
+
+	auto simplehash = static_cast<uint32_t>(buf.size());
+	for (size_t i = 0; i < buf.size(); i += 4)
+	    simplehash ^= *reinterpret_cast<uint32_t*>(&buf[i]);
 
 	const auto& dosh = *(IMAGE_DOS_HEADER*)(&buf[0]);
 	const auto& nth = *(IMAGE_NT_HEADERS*)(&buf[dosh.e_lfanew]);
 
 	std::span<char> virt((char*)executable_allocate(nth.OptionalHeader.SizeOfImage), nth.OptionalHeader.SizeOfImage);
-	std::cerr << std::hex << "Base: 0x" << (size_t)&virt[0] << std::endl;
+	fprintf(stderr, "Base: 0x%zX\n", (size_t)virt.data());
 
 	const auto ddoff = dosh.e_lfanew + sizeof(uint32_t) + sizeof(IMAGE_FILE_HEADER) + nth.FileHeader.SizeOfOptionalHeader;
 	memcpy(&virt[0], &buf[0], ddoff + sizeof(IMAGE_SECTION_HEADER) * nth.FileHeader.NumberOfSections);
@@ -331,106 +549,97 @@ int main() {
 		i += page.SizeOfBlock;
 	}
 
-	const auto cpfnOodleSetMallocFree = lookup_in_text(
-		&virt[0],
-		"\x75\x16\x68\x00\x00\x00\x00\x68\x00\x00\x00\x00\xe8",
-		"\xff\xff\xff\x00\x00\x00\x00\xff\x00\x00\x00\x00\xe8",
-		13) + 12;
-	const auto pfnOodleSetMallocFree = (Oodle_SetMallocFree*)(cpfnOodleSetMallocFree + 5 + *(int*)(cpfnOodleSetMallocFree + 1));
+	char cacheFileName[256];
+	snprintf(cacheFileName, sizeof cacheFileName, "ffxiv.sig.%08x.dat", simplehash);
 
-	std::vector<const char*> calls;
-	for (auto sig1 = lookup_in_text(
-		&virt[0],
-		"\x83\x7e\x00\x00\x75\x00\x6a\x00\xe8\x00\x00\x00\x00\x6a\x00\x6a\x00\x50\xe8",
-		"\xff\xff\x00\x00\xff\x00\xff\x00\xff\x00\x00\x00\x00\xff\xff\xff\xff\xff\xff",
-		19), sig2 = sig1 + 1024; calls.size() < 6 && sig1 < sig2; sig1++) {
-		if (*sig1 != (char)0xe8)
-			continue;
-		const auto pTargetAddress = sig1 + 5 + *(int*)(sig1 + 1);
-		if (pTargetAddress < virt.data() || pTargetAddress >= virt.data() + virt.size())
-			continue;
-		calls.push_back(pTargetAddress);
+	OodleXiv oodleXiv{};
+
+	auto writeAfterLookup = true;
+	if (const auto fprev = fopen(cacheFileName, "rb")) {
+		fread(&oodleXiv, sizeof oodleXiv, 1, fprev);
+		fclose(fprev);
+
+		writeAfterLookup = !oodleXiv.Ready;
 	}
-	if (calls.size() < 5) {
-		std::cerr << "Could not find signature" << std::endl;
+
+	if (!oodleXiv.Lookup(virt)) {
+		fprintf(stderr, "Failed to look for signatures.\n");
 		return -1;
+	} else {
+		fprintf(stderr, "All signatures resolved.\n");
+
+		fprintf(stderr, "htbits: 0x%zX\n", oodleXiv.HtBits);
+		fprintf(stderr, "window size: 0x%zX\n", oodleXiv.Window);
+		fprintf(stderr, "SharedSize: ffxiv.exe+0x%zX\n", reinterpret_cast<const char*>(oodleXiv.SharedSize) - virt.data());
+		fprintf(stderr, "SetMallocFree: ffxiv.exe+0x%zX\n", reinterpret_cast<const char*>(oodleXiv.SetMallocFree) - virt.data());
+		fprintf(stderr, "SharedSetWindow: ffxiv.exe+0x%zX\n", reinterpret_cast<const char*>(oodleXiv.SharedSetWindow) - virt.data());
+		fprintf(stderr, "UdpStateSize: ffxiv.exe+0x%zX\n", reinterpret_cast<const char*>(oodleXiv.UdpStateSize) - virt.data());
+		fprintf(stderr, "TcpStateSize: ffxiv.exe+0x%zX\n", reinterpret_cast<const char*>(oodleXiv.TcpStateSize) - virt.data());
+		fprintf(stderr, "TcpTrain: ffxiv.exe+0x%zX\n", reinterpret_cast<const char*>(oodleXiv.TcpTrain) - virt.data());
+		fprintf(stderr, "UdpTrain: ffxiv.exe+0x%zX\n", reinterpret_cast<const char*>(oodleXiv.UdpTrain) - virt.data());
+		fprintf(stderr, "TcpDecode: ffxiv.exe+0x%zX\n", reinterpret_cast<const char*>(oodleXiv.TcpDecode) - virt.data());
+		fprintf(stderr, "UdpDecode: ffxiv.exe+0x%zX\n", reinterpret_cast<const char*>(oodleXiv.UdpDecode) - virt.data());
+		fprintf(stderr, "TcpEncode: ffxiv.exe+0x%zX\n", reinterpret_cast<const char*>(oodleXiv.TcpEncode) - virt.data());
+		fprintf(stderr, "UdpEncode: ffxiv.exe+0x%zX\n", reinterpret_cast<const char*>(oodleXiv.UdpEncode) - virt.data());
 	}
-	const auto pfnOodleNetwork1_Shared_Size = (OodleNetwork1_Shared_Size*)calls[0];
-	const auto pfnOodleNetwork1_Shared_SetWindow = (OodleNetwork1_Shared_SetWindow*)calls[2];
-	const auto pfnOodleNetwork1UDP_State_Size = (OodleNetwork1UDP_State_Size*)(lookup_in_text(&virt[0],
-		"\xcc\xb8\x00\xb4\x2e\x00",
-		"\xff\xff\xff\xff\xff\xff",
-		6) + 1
-		);
-	const auto pfnOodleNetwork1UDP_Train = (OodleNetwork1UDP_Train*)(lookup_in_text(&virt[0],
-			"\x56\x6a\x08\x68\x00\x84\x4a\x00",
-			"\xff\xff\xff\xff\xff\xff\xff\xff",
-			8)
-		);
 
-	const auto pfnOodleNetwork1UDP_Decode = (OodleNetwork1UDP_Decode*)lookup_in_text(
-		&virt[0],
-		"\x8b\x44\x24\x18\x56\x85\xc0\x7e\x00\x8b\x74\x24\x14\x85\xf6\x7e\x00\x3b\xf0",
-		"\xff\xff\xff\xff\xff\xff\xff\xff\x00\xff\xff\xff\xff\xff\xff\xff\x00\xff\xff",
-		19);
-
-	const auto pfnOodleNetwork1UDP_Encode = (OodleNetwork1UDP_Encode*)lookup_in_text(
-		&virt[0],
-		"\xff\x74\x24\x14\x8b\x4c\x24\x08\xff\x74\x24\x14\xff\x74\x24\x14\xff\x74\x24\x14\xe8\x00\x00\x00\x00\xc2\x14\x00\xcc\xcc\xcc\xcc\xb8",
-		"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\x00\x00\x00\x00\xff\xff\xff\xff\xff\xff\xff\xff",
-		33);
-
-	int htbits = 19;
-	pfnOodleSetMallocFree(&my_malloc, &my_free);
-	std::vector<uint8_t> state(pfnOodleNetwork1UDP_State_Size());
-	std::vector<uint8_t> shared(pfnOodleNetwork1_Shared_Size(htbits));
-	std::vector<uint8_t> window(0x100000);
-
-	pfnOodleNetwork1_Shared_SetWindow(&shared[0], htbits, &window[0], static_cast<int>(window.size()));
-	pfnOodleNetwork1UDP_Train(&state[0], &shared[0], nullptr, nullptr, 0);
-
-	std::vector<uint8_t> src, dst;
-	src.resize(256);
-	for (int i = 0; i < 256; i++)
-		src[i] = i;
-	dst.resize(src.size());
-	dst.resize(pfnOodleNetwork1UDP_Encode(&state[0], &shared[0], &src[0], src.size(), &dst[0]));
-	if (!pfnOodleNetwork1UDP_Decode(&state[0], &shared[0], &dst[0], dst.size(), &src[0], src.size())) {
-		std::cerr << "Oodle encode/decode test failure" << std::endl;
-		return -1;
-	}
-	else {
-		std::cerr << "Oodle encode test: 256 -> " << dst.size() << std::endl;
-	}
-	for (int i = 0; i < 256; i++) {
-		if (src[i] != i) {
-			std::cerr << "Oodle encode/decode test failure" << std::endl;
-			break;
+	if (writeAfterLookup) {
+		const auto f = fopen(cacheFileName, "wb");
+		if (f) {
+			fwrite(&oodleXiv, sizeof oodleXiv, 1, f);
+			fclose(f);
 		}
 	}
 
-	std::cerr << "Oodle helper running: state=" << state.size() << " shared=" << shared.size() << " window=" << window.size() << std::endl;
+	memset(reinterpret_cast<char*>(oodleXiv.TcpTrain) + 0xaba - 0xAB0, 0x90, 6);
+	memset(reinterpret_cast<char*>(oodleXiv.TcpTrain) + 0xad2 - 0xAB0, 0x90, 6);
+	memset(reinterpret_cast<char*>(oodleXiv.TcpTrain) + 0xbb4 - 0xAB0, 0x90, 7);
+	memset(reinterpret_cast<char*>(oodleXiv.TcpTrain) + 0xbc8 - 0xAB0, 0x90, 7);
+
+	oodleXiv.SetMallocFree(&my_malloc, &my_free);
+
+	Oodle oodleUdp;
+	oodleUdp.SetupUdp(oodleXiv);
+
+	Oodle oodleTcp[4];
+	for (auto& o : oodleTcp)
+		o.SetupTcp(oodleXiv);
+
+	fprintf(stderr, "Oodle helper running.\n");
+
+	std::vector<uint8_t> src, dst;
 	while (true) {
 		struct my_header_t {
 			uint32_t SourceLength;
 			uint32_t TargetLength;
+			uint32_t Channel;
 		} hdr{};
+		static_assert(sizeof(my_header_t) == 12);
+
 		fread(&hdr, sizeof(hdr), 1, stdin);
 		if (!hdr.SourceLength)
 			return 0;
 
-		// std::cerr << "Request: src=0x" << hdr.SourceLength << " dst=0x" << hdr.TargetLength << std::endl;
 		src.resize(hdr.SourceLength);
 		fread(&src[0], 1, src.size(), stdin);
 
-		if (hdr.TargetLength == 0xFFFFFFFFU) {
-			dst.resize(src.size());
-			dst.resize(pfnOodleNetwork1UDP_Encode(&state[0], &shared[0], &src[0], src.size(), &dst[0]));
-			// std::cerr << "Encoded: res=0x" << dst.size() << std::endl;
-		}
-		else {
+		if (hdr.TargetLength == 0xFFFFFFFFu) {
+			dst.resize(Oodle::CompressedBufferSizeNeeded(src.size()));
+			if (hdr.Channel == 0xFFFFFFFFu)
+				dst.resize(oodleUdp.Encode(src.data(), src.size(), dst.data(), dst.size()));
+			else if (hdr.Channel < 4)
+				dst.resize(oodleTcp[hdr.Channel].Encode(src.data(), src.size(), dst.data(), dst.size()));
+			else
+				dst.resize(0);
+
+		} else {
 			dst.resize(hdr.TargetLength);
-			if (!pfnOodleNetwork1UDP_Decode(&state[0], &shared[0], &src[0], src.size(), &dst[0], dst.size())) {
+			auto ok = false;
+			if (hdr.Channel == 0xFFFFFFFFu)
+				ok = oodleUdp.Decode(src.data(), src.size(), dst.data(), dst.size());
+			else if (hdr.Channel < 4)
+				ok = oodleTcp[hdr.Channel].Decode(src.data(), src.size(), dst.data(), dst.size());
+			if (!ok) {
 				dst.resize(0);
 				dst.resize(hdr.TargetLength);
 			}
@@ -440,8 +649,7 @@ int main() {
 		fwrite(&dst[0], 1, dst.size(), stdout);
 		fflush(stdout);
 	}
-}
-"""
+}"""
 
 
 def clamp(v: T, min_: T, max_: T) -> T:
@@ -937,37 +1145,40 @@ class XivMessageHeader(ctypes.LittleEndianStructure):
 
 
 class OodleHelper:
-    oodle_helper_path: typing.Optional[str] = None
-    _process: typing.ClassVar[typing.Optional[subprocess.Popen]] = None
+    oodle_helper_path: typing.ClassVar[typing.Optional[str]] = None
+    _process: typing.Optional[subprocess.Popen] = None
 
-    @classmethod
-    def _init(cls):
-        if cls._process is not None and cls._process.poll() is None:
-            return
+    def __enter__(self):
+        self._process = subprocess.Popen(self.oodle_helper_path, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        return self
 
-        cls._process = subprocess.Popen(cls.oodle_helper_path, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self._process.kill()
+        self._process = None
 
-    @classmethod
-    def decode(cls, data: bytes, declen: int) -> bytes:
-        cls._init()
+    def decode(self, channel: int, data: bytes, declen: int) -> bytes:
+        self._process: subprocess.Popen
+        self._process.stdin.write(b''.join((
+            int.to_bytes(len(data), 4, "little"),
+            int.to_bytes(declen, 4, "little"),
+            int.to_bytes(channel, 4, "little"),
+            data)))
+        self._process.stdin.flush()
 
-        cls._process: subprocess.Popen
-        cls._process.stdin.write(int.to_bytes(len(data), 4, "little") + int.to_bytes(declen, 4, "little") + data)
-        cls._process.stdin.flush()
+        reslen = int.from_bytes(self._process.stdout.read(4), "little")
+        return self._process.stdout.read(reslen)
 
-        reslen = int.from_bytes(cls._process.stdout.read(4), "little")
-        return cls._process.stdout.read(reslen)
+    def encode(self, channel: int, data: bytes) -> bytes:
+        self._process: subprocess.Popen
+        self._process.stdin.write(b''.join((
+            int.to_bytes(len(data), 4, "little"),
+            b'\xFF\xFF\xFF\xFF',
+            int.to_bytes(channel, 4, "little"),
+            data)))
+        self._process.stdin.flush()
 
-    @classmethod
-    def encode(cls, data: bytes) -> bytes:
-        cls._init()
-
-        cls._process: subprocess.Popen
-        cls._process.stdin.write(int.to_bytes(len(data), 4, "little") + b'\xFF\xFF\xFF\xFF' + data)
-        cls._process.stdin.flush()
-
-        reslen = int.from_bytes(cls._process.stdout.read(4), "little")
-        return cls._process.stdout.read(reslen)
+        reslen = int.from_bytes(self._process.stdout.read(4), "little")
+        return self._process.stdout.read(reslen)
 
     @classmethod
     def init_executable(cls):
@@ -1015,7 +1226,7 @@ class XivBundleHeader(ctypes.LittleEndianStructure):
     decoded_body_length: typing.Union[int, ctypes.c_uint32]
 
     @classmethod
-    def find(cls, data: typing.Union[bytearray, memoryview]):
+    def find(cls, data: typing.Union[bytearray, memoryview], oodle: OodleHelper, oodle_channel: int):
         offset = 0
         while offset < len(data):
             available_bytes = len(data) - offset
@@ -1054,7 +1265,7 @@ class XivBundleHeader(ctypes.LittleEndianStructure):
                 elif bundle_header.compression == 1:
                     bundle_data = bytearray(zlib.decompress(bundle_data))
                 elif bundle_header.compression == 2:
-                    bundle_data = bytearray(OodleHelper.decode(bundle_data, bundle_header.decoded_body_length))
+                    bundle_data = bytearray(oodle.decode(oodle_channel, bundle_data, bundle_header.decoded_body_length))
                 else:
                     raise RuntimeError(f"Unsupported compression method {bundle_header.compression}")
 
@@ -1095,6 +1306,7 @@ class OpcodeDefinition:
     S2C_ActorCast: int
     S2C_ActorControl: int
     S2C_ActorControlSelf: int
+    Common_UseOodleTcp: bool
     Server_IpRange: typing.List[typing.Union[ipaddress.IPv4Network,
     typing.Tuple[ipaddress.IPv4Address, ipaddress.IPv4Address]]]
     Server_PortRange: typing.List[typing.Tuple[int, int]]
@@ -1152,6 +1364,7 @@ class OpcodeDefinition:
 
 @dataclasses.dataclass
 class SocketSet:
+    oodle_tcp_base_channel: int
     source: socket.socket
     target: socket.socket
     log_prefix: str
@@ -1273,9 +1486,13 @@ class Connection:
 
             dn = definition.Name
             self.opcodes = definition
+            self.oodle = OodleHelper()
+            self._use_oodle_tcp = definition.Common_UseOodleTcp
+
             break
         else:
             self.opcodes = None
+            self.oodle = None
             dn = "-"
         logging.info(f"New[{dn}] {self.downstream.getsockname()} {self.downstream.getpeername()} {self.destination}")
 
@@ -1464,14 +1681,19 @@ class Connection:
         messages: typing.List[typing.Tuple[XivMessageHeader, bytearray]]
 
         self.upstream.settimeout(3)
-        with self.downstream, self.upstream:
+        with contextlib.ExitStack() as estack:
+            estack.enter_context(self.downstream)
+            estack.enter_context(self.upstream)
+            if self.oodle is not None:
+                estack.enter_context(self.oodle)
+
             try:
                 self.upstream.connect((str(self.destination[0]), self.destination[1]))
                 self.upstream.settimeout(None)
 
                 check_targets = {
-                    self.downstream: SocketSet(self.downstream, self.upstream, "D->U", self.to_upstream),
-                    self.upstream: SocketSet(self.upstream, self.downstream, "U->D", self.to_downstream),
+                    self.downstream: SocketSet(0, self.downstream, self.upstream, "D->U", self.to_upstream),
+                    self.upstream: SocketSet(2, self.upstream, self.downstream, "U->D", self.to_downstream),
                 }
                 while True:
                     rlist = [
@@ -1502,7 +1724,9 @@ class Connection:
                                 target.outgoing.extend(data)
                             else:
                                 target.incoming.extend(data)
-                                it = XivBundleHeader.find(bytearray(target.incoming))
+                                it = XivBundleHeader.find(
+                                    bytearray(target.incoming), self.oodle,
+                                    target.oodle_tcp_base_channel if self._use_oodle_tcp else 0xFFFFFFFF)
                                 while True:
                                     try:
                                         bundle = next(it)
@@ -1528,7 +1752,9 @@ class Connection:
                                         if bundle_header.compression == 1:
                                             message_bytes = zlib.compress(message_bytes)
                                         elif bundle_header.compression == 2:
-                                            message_bytes = OodleHelper.encode(message_bytes)
+                                            message_bytes = self.oodle.encode(
+                                                target.oodle_tcp_base_channel + 1 if self._use_oodle_tcp else 0xFFFFFFFF,
+                                                message_bytes)
 
                                         bundle_header.message_count = len(messages)
                                         bundle_header.length = ctypes.sizeof(bundle_header) + len(message_bytes)
@@ -1772,6 +1998,28 @@ def download_exe(src_url: str):
     raise RuntimeError("downloaded patch file does not contain a .exe file")
 
 
+def test_oodle():
+    testval = b'\x00\x00\x00\x04\x00\x00\x00\x04\x00\x00\x00\x04\x00\x00\x00\x04' * 16
+    with OodleHelper() as oodle:
+        enc = oodle.encode(0, testval)
+        dec = oodle.decode(1, enc, len(testval))
+        if testval != dec:
+            print(testval)
+            print(enc)
+            print(dec)
+            print(f"Oodle test fail (TCP)")
+            return False
+        enc = oodle.encode(0xFFFFFFFF, testval)
+        dec = oodle.decode(0xFFFFFFFF, enc, len(testval))
+        if testval != dec:
+            print(testval)
+            print(enc)
+            print(dec)
+            print(f"Oodle test fail (UDP)")
+            return False
+    return True
+
+
 def __main__() -> int:
     if sys.version_info < (3, 8):
         print("This script requires at least python 3.8")
@@ -1809,10 +2057,7 @@ def __main__() -> int:
     logging.info(f"Use measured socket latency: {'yes' if args.measure_ping else 'no'}")
 
     OodleHelper.init_executable()
-    testval = b'\x00\x00\x00\x04\x00\x00\x00\x04\x00\x00\x00\x04\x00\x00\x00\x04' * 16
-    enc = OodleHelper.encode(testval)
-    dec = OodleHelper.decode(enc, len(testval))
-    if testval != dec:
+    if not test_oodle():
         print("Oodle test fail")
         return -1
 
