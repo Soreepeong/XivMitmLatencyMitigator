@@ -276,6 +276,8 @@ class ImageBaseRelocation(ctypes.LittleEndianStructure):
 
 # endregion
 
+# region x86/x64-specific system ffi definitions
+
 POINTER_SIZE = ctypes.sizeof(ctypes.c_void_p)
 if os.name == 'nt':
     crt_malloc = ctypes.cdll.msvcrt.malloc
@@ -307,7 +309,6 @@ else:
 
     def allocate_executable_memory(length: int):
         p = libc.memalign(mmap.PAGESIZE, length)
-        print(f"memalign: 0x{p:X}")
         libc.mprotect(p, length, mmap.PROT_READ | mmap.PROT_WRITE | mmap.PROT_EXEC)
         return ctypes.c_void_p(p)
 
@@ -324,19 +325,9 @@ PyMemoryView_FromMemory.argtypes = (ctypes.c_void_p, ctypes.c_ssize_t, ctypes.c_
 PyMemoryView_FromMemory.restype = ctypes.py_object
 
 
-def my_malloc(size: int, align: int) -> int:
-    raw = crt_malloc(size + align + POINTER_SIZE - 1)
-    if raw == 0:
-        return 0
+# endregion
 
-    aligned = (raw + align + POINTER_SIZE - 1) & ((~align & (sys.maxsize * 2 + 1)) + 1)
-    ctypes.c_void_p.from_address(aligned - POINTER_SIZE).value = raw
-    return aligned
-
-
-def my_free(aligned: int):
-    crt_free(ctypes.c_void_p.from_address(aligned - POINTER_SIZE).value)
-
+# region budget windows stdcall <-> linux cdecl ABI converters
 
 class PeImage:
     def __init__(self, data: bytearray | bytes):
@@ -420,9 +411,10 @@ class PeImage:
 
 
 class StdCallFunc32ByPythonFunction:
-    def __init__(self, pyctypefn, fn: callable, arglen: int):
+    def __init__(self, pyctypefn, fn: callable, arglen: int, name: str):
         self._inner = pyctypefn(fn)
         self._fn = fn
+        self._name = name
         inner_address = ctypes.cast(self._inner, ctypes.c_void_p)
 
         codelen = 1 + arglen // 4 * 7 + 5 + 2 + 6 + 3
@@ -463,16 +455,33 @@ class StdCallFunc32ByPythonFunction:
 
 
 class StdCallFunc64ByPythonFunction:
-    def __init__(self, pyctypefn, fn: callable, arglen: int):
+    def __init__(self, pyctypefn, fn: callable, arglen: int, name: str):
         self._inner = pyctypefn(fn)
         self._fn = fn
+        self._name = name
         inner_address = ctypes.cast(self._inner, ctypes.c_void_p)
 
-        template = "\x57\x56\x48\x89\xCF\x48\x89\xD6\x4C\x89\xC2\x4C\x89\xC9\x48\xB8\x89\x67\x45\x23\x01\x00\x00\x00\xFF\xD0\x5E\x5F\xC3"
-        codeptr = allocate_executable_memory(len(template))
-        (ctypes.c_uint8 * len(template)).from_address(codeptr.value).value = template
-        ctypes.c_uint32.from_address(codeptr.value + 16).value = inner_address.value
-        self._address = codeptr
+        cmds = [
+            b"\x48\x83\xec\x38",  # sub rsp, 0x38
+            b"\x57",  # push rdi
+            b"\x56",  # push rsi
+            b"\x48\x89\xCF",  # mov rdi, rcx
+            b"\x48\x89\xD6",  # mov rsi, rdx
+            b"\x4C\x89\xC2",  # mov rdx, r8
+            b"\x4C\x89\xC9",  # mov rcx, r9
+            b"\x48\xB8", inner_address.value.to_bytes(8, "little"),  # movabs rax, 0x0
+            b"\xFF\xD0",  # call rax
+            b"\x5E",  # pop rsi
+            b"\x5F",  # pop rdi
+            b"\x48\x83\xc4\x38",  # add rsp, 0x38
+            b"\xC3",  # ret
+        ]
+
+        cmds = bytearray().join(cmds)
+        self._address = allocate_executable_memory(len(cmds))
+        ctypes.memmove(self._address.value,
+                       ctypes.addressof((ctypes.c_uint8 * len(cmds)).from_buffer(cmds)),
+                       len(cmds))
 
     def address(self):
         return self._address
@@ -482,7 +491,8 @@ class StdCallFunc64ByPythonFunction:
 
 
 class StdCallFunc32ByFunctionPointer:
-    def __init__(self, ptr: int, argtypes, noargtypefn):
+    def __init__(self, ptr: int, argtypes, noargtypefn, name: str):
+        self._name = name
         self._ptr = ptr
         self._argtypes = argtypes
         self._codelen = 1 + sum((ctypes.sizeof(argtype) + 3) // 4 * 5 for argtype in argtypes) + 8
@@ -530,36 +540,83 @@ class StdCallFunc32ByFunctionPointer:
 
 
 class StdCallFunc64ByFunctionPointer:
-    def __init__(self, ptr: int, argtypes, noargtypefn):
+    def __init__(self, ptr: int, argtypes, noargtypefn, name: str):
         self._ptr = ptr
         self._argtypes = argtypes
         self._noargtypefn = noargtypefn
+        self._name = name
+
+        movabs_regs = (
+            b"\x48\xb9",  # movabs rcx, imm
+            b"\x48\xba",  # movabs rdx, imm
+            b"\x49\xb8",  # movabs r8, imm
+            b"\x49\xb9",  # movabs r9, imm
+        )
+
+        cmds = [
+            b"\x57",  # push rdi
+            b"\x56",  # push rsi
+
+            # sub rsp, imm
+            b"\x48\x83\xec",
+            (0x8 + (len(argtypes) + 1) // 2 * 2 * 8).to_bytes(1, "little"),
+        ]
+        self._offsets = []
+
+        for i, argtype in enumerate(self._argtypes):
+            if i < len(movabs_regs):
+                cmds.append(movabs_regs[i])
+                self._offsets.append(sum(len(x) for x in cmds))
+                cmds.append(bytes(8))
+            else:
+                # movabs rax, imm
+                cmds.append(b"\x48\xb8")
+                self._offsets.append(sum(len(x) for x in cmds))
+                cmds.append(bytes(8))
+
+                # mov qword ptr [rsp + N], rax
+                cmds.append(b"\x48\x89\x44\x24")
+                cmds.append((i * 8).to_bytes(1, "little"))
+
+        # movabs rax, imm
+        cmds.append(b"\x48\xb8")
+        cmds.append(self._ptr.to_bytes(8, "little"))
+
+        cmds.append(b"\xff\xd0")  # call rax
+
+        # add rsp, imm
+        cmds.append(b"\x48\x83\xc4" + (0x8 + (len(argtypes) + 1) // 2 * 2 * 8).to_bytes(1, "little"))
+
+        cmds.append(b"\x5e")  # pop rsi
+        cmds.append(b"\x5f")  # pop rdi
+        cmds.append(b"\xc3")  # ret
+
+        self._template = bytearray().join(cmds)
 
     def address(self):
         return ctypes.c_void_p(self._ptr)
 
     def __call__(self, *args):
-        template = b"\x57\x56\x48\xBF\x00\x00\x00\x00\x00\x00\x00\x00\x48\xBE\x00\x00\x00\x00\x00\x00\x00\x00\x48\xBA\x00\x00\x00\x00\x00\x00\x00\x00\x48\xB9\x00\x00\x00\x00\x00\x00\x00\x00\x49\xB8\x00\x00\x00\x00\x00\x00\x00\x00\x49\xB9\x00\x00\x00\x00\x00\x00\x00\x00\x48\xB8\x00\x00\x00\x00\x00\x00\x00\x00\xFF\xD0\x5E\x5F\xC3"
-        codeptr = allocate_executable_memory(len(template))
-        for i in range(len(template)):
-            ctypes.c_uint8.from_address(codeptr.value + i).value = template[i]
-        for i, (argtype, arg) in enumerate(zip(reversed(self._argtypes), reversed(args))):
+        codeptr = allocate_executable_memory(len(self._template))
+        ctypes.memmove(codeptr.value,
+                       ctypes.addressof(ctypes.c_uint8.from_buffer(self._template)),
+                       len(self._template))
+
+        cmd = self._template
+        for argtype, arg, offset in zip(self._argtypes, args, self._offsets):
             arglen = ctypes.sizeof(argtype)
             if not isinstance(arg, argtype):
                 arg = argtype(arg)
-            argb = (ctypes.c_uint8 * arglen).from_address(ctypes.addressof(arg))
-            ctypes.c_uint64.from_address(codeptr.value + 4 + 10 * i).value = int.from_bytes(bytes(argb), "little")
-        ctypes.c_uint32.from_address(codeptr.value + 4 + 10 * 6).value = self._ptr
+            ctypes.memmove(codeptr.value + offset, ctypes.addressof(arg), arglen)
 
-        print(f"Calling 0x{codeptr.value:X}")
         res = self._noargtypefn(codeptr.value)()
         free_executable_memory(codeptr)
-
         return res
 
 
 class StdCallFunc32Type:
-    def __init__(self, restype, *argtypes):
+    def __init__(self, restype, *argtypes, name: typing.Optional[str] = None):
+        self._name = name or ("(" + ", ".join(str(x) for x in (restype, *argtypes)) + ")")
         self._restype = restype
         self._argtypes = argtypes
         self._arglen = sum((ctypes.sizeof(argtype) + 3) // 4 * 4 for argtype in self._argtypes)
@@ -568,15 +625,16 @@ class StdCallFunc32Type:
 
     def __call__(self, ptr):
         if callable(ptr):
-            return StdCallFunc32ByPythonFunction(self._pytype, ptr, self._arglen)
+            return StdCallFunc32ByPythonFunction(self._pytype, ptr, self._arglen, self._name)
         elif isinstance(ptr, int):
-            return StdCallFunc32ByFunctionPointer(ptr, self._argtypes, self._noarg_type)
+            return StdCallFunc32ByFunctionPointer(ptr, self._argtypes, self._noarg_type, self._name)
         else:
             raise TypeError
 
 
 class StdCallFunc64Type:
-    def __init__(self, restype, *argtypes):
+    def __init__(self, restype, *argtypes, name: typing.Optional[str] = None):
+        self._name = name or ("(" + ", ".join(str(x) for x in (restype, *argtypes)) + ")")
         self._restype = restype
         self._argtypes = argtypes
         self._arglen = sum((ctypes.sizeof(argtype) + 3) // 4 * 4 for argtype in self._argtypes)
@@ -585,9 +643,9 @@ class StdCallFunc64Type:
 
     def __call__(self, ptr):
         if callable(ptr):
-            return StdCallFunc64ByPythonFunction(self._pytype, ptr, self._arglen)
+            return StdCallFunc64ByPythonFunction(self._pytype, ptr, self._arglen, self._name)
         elif isinstance(ptr, int):
-            return StdCallFunc64ByFunctionPointer(ptr, self._argtypes, self._noarg_type)
+            return StdCallFunc64ByFunctionPointer(ptr, self._argtypes, self._noarg_type, self._name)
         else:
             raise TypeError
 
@@ -597,28 +655,48 @@ if POINTER_SIZE == 4:
 else:
     StdCallFuncType = StdCallFunc64Type
 
-OodleNetwork1_Shared_Size = StdCallFuncType(
-    ctypes.c_int32, ctypes.c_int32)
-OodleNetwork1_Shared_SetWindow = StdCallFuncType(
-    None, ctypes.c_void_p, ctypes.c_int32, ctypes.c_void_p, ctypes.c_int32)
-OodleNetwork1_Proto_Train = StdCallFuncType(
-    None, ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_int32),
-    ctypes.c_int32)
-OodleNetwork1_Proto_Decode = StdCallFuncType(
-    ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p,
-    ctypes.c_size_t)
-OodleNetwork1_Proto_Encode = StdCallFuncType(
-    ctypes.c_int32, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p)
-OodleNetwork1_Proto_State_Size = StdCallFuncType(ctypes.c_int32)
-Oodle_Malloc = StdCallFuncType(ctypes.c_size_t, ctypes.c_size_t, ctypes.c_int32)
-Oodle_Free = StdCallFuncType(None, ctypes.c_size_t)
-Oodle_SetMallocFree = StdCallFuncType(None, ctypes.c_void_p, ctypes.c_void_p)
+# endregion
+
+# region Oodle typedefs
+
+OodleNetwork1_Shared_Size = StdCallFuncType(ctypes.c_int32, ctypes.c_int32, name="OodleNetwork1_Shared_Size")
+OodleNetwork1_Shared_SetWindow = StdCallFuncType(None, ctypes.c_void_p, ctypes.c_int32, ctypes.c_void_p, ctypes.c_int32,
+                                                 name="OodleNetwork1_Shared_SetWindow")
+OodleNetwork1_Proto_Train = StdCallFuncType(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p),
+                                            ctypes.POINTER(ctypes.c_int32), ctypes.c_int32,
+                                            name="OodleNetwork1_Proto_Train")
+OodleNetwork1_Proto_Decode = StdCallFuncType(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+                                             ctypes.c_size_t, ctypes.c_void_p, ctypes.c_size_t,
+                                             name="OodleNetwork1_Proto_Decode")
+OodleNetwork1_Proto_Encode = StdCallFuncType(ctypes.c_int32, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+                                             ctypes.c_size_t, ctypes.c_void_p, name="OodleNetwork1_Proto_Encode")
+OodleNetwork1_Proto_State_Size = StdCallFuncType(ctypes.c_int32, name="OodleNetwork1_Proto_State_Size")
+Oodle_Malloc = StdCallFuncType(ctypes.c_size_t, ctypes.c_size_t, ctypes.c_int32, name="Oodle_Malloc")
+Oodle_Free = StdCallFuncType(None, ctypes.c_size_t, name="Oodle_Free")
+Oodle_SetMallocFree = StdCallFuncType(None, ctypes.c_void_p, ctypes.c_void_p, name="Oodle_SetMallocFree")
 
 
-class Oodle:
-    def __init__(self, image: PeImage, htbits: int, window: int = 0x100000):
+# endregion
+
+# region Oodle wrappers
+
+def oodle_malloc_impl(size: int, align: int) -> int:
+    raw = crt_malloc(size + align + POINTER_SIZE - 1)
+    if raw == 0:
+        return 0
+
+    aligned = (raw + align + POINTER_SIZE - 1) & ((~align & (sys.maxsize * 2 + 1)) + 1)
+    ctypes.c_void_p.from_address(aligned - POINTER_SIZE).value = raw
+    return aligned
+
+
+def oodle_free_impl(aligned: int):
+    crt_free(ctypes.c_void_p.from_address(aligned - POINTER_SIZE).value)
+
+
+class OodleModule:
+    def __init__(self, image: PeImage):
         self._image = image
-        print(f"Base address: 0x{image.address.value:X}")
 
         text = image.section_header(b".text")
         text_view = image.section(text)
@@ -627,92 +705,133 @@ class Oodle:
             pattern = br"\x75.\x48\x8d\x15....\x48\x8d\x0d....\xe8(....)\xc6\x05....\x01.{0,256}\x75.\xb9(....)\xe8(....)\x45\x33\xc0\x33\xd2\x48\x8b\xc8\xe8.....{0,6}\x41\xb9(....)\xba.....{0,6}\x48\x8b\xc8\xe8(....)"
         else:
             pattern = br"\x75\x16\x68....\x68....\xe8(....)\xc6\x05....\x01.{0,256}\x75\x27\x6a(.)\xe8(....)\x6a\x00\x6a\x00\x50\xe8....\x83\xc4.\x89\x46.\x68(....)\xff\x76.\x6a.\x50\xe8(....)"
-        if not (match := re.search(pattern, text_view, re.DOTALL)):
-            raise Exception
-        self._SetMallocFree = Oodle_SetMallocFree(
-            image.address.value + image.resolve_rip_relative(text.VirtualAddress + match.start(1) - 1))
-        self._htbits = int.from_bytes(match.group(2), "little")
-        self._SharedSize = OodleNetwork1_Shared_Size(
-            image.address.value + image.resolve_rip_relative(text.VirtualAddress + match.start(3) - 1))
-        self._window = int.from_bytes(match.group(4), "little")
-        self._SharedSetWindow = OodleNetwork1_Shared_Size(
-            image.address.value + image.resolve_rip_relative(text.VirtualAddress + match.start(5) - 1))
+        match = re.search(pattern, text_view, re.DOTALL)
+        if not match:
+            raise RuntimeError("Could not find InitOodle.")
+        self.set_malloc_free_address = image.address.value + image.resolve_rip_relative(
+            text.VirtualAddress + match.start(1) - 1)
+        self.htbits = int.from_bytes(match.group(2), "little")
+        self.shared_size_address = image.address.value + image.resolve_rip_relative(
+            text.VirtualAddress + match.start(3) - 1)
+        self.window = int.from_bytes(match.group(4), "little")
+        self.shared_set_window_address = image.address.value + image.resolve_rip_relative(
+            text.VirtualAddress + match.start(5) - 1)
 
         if POINTER_SIZE == 8:
             pattern = br"\x75\x04\x48\x89\x7e.\xe8(....)\x4c..\xe8(....).{0,256}\x01\x75\x0a\x48\x8b\x0f\xe8(....)\xeb\x09\x48\x8b\x4f\x08\xe8(....)"
         else:
             pattern = br"\xe8(....)\x8b\xd8\xe8(....)\x83\x7d\x10\x01.{0,256}\x83\x7d\x10\x01\x6a\x00\x6a\x00\x6a\x00\xff\x77.\x75\x09\xff.\xe8(....)\xeb\x08\xff\x76.\xe8(....)"
-        if not (match := re.search(pattern, text_view, re.DOTALL)):
-            raise Exception
-        self._UdpStateSize = OodleNetwork1_Proto_State_Size(
-            image.address.value + image.resolve_rip_relative(text.VirtualAddress + match.start(1) - 1))
-        self._TcpStateSize = OodleNetwork1_Proto_State_Size(
-            image.address.value + image.resolve_rip_relative(text.VirtualAddress + match.start(2) - 1))
-        self._TcpTrain = OodleNetwork1_Proto_Train(
-            image.address.value + image.resolve_rip_relative(text.VirtualAddress + match.start(3) - 1))
-        self._UdpTrain = OodleNetwork1_Proto_Train(
-            image.address.value + image.resolve_rip_relative(text.VirtualAddress + match.start(4) - 1))
+        match = re.search(pattern, text_view, re.DOTALL)
+        if not match:
+            raise RuntimeError("Could not find SetUpStatesAndTrain.")
+        self.udp_state_size_address = image.address.value + image.resolve_rip_relative(
+            text.VirtualAddress + match.start(1) - 1)
+        self.tcp_state_size_address = image.address.value + image.resolve_rip_relative(
+            text.VirtualAddress + match.start(2) - 1)
+        self.tcp_train_address = image.address.value + image.resolve_rip_relative(
+            text.VirtualAddress + match.start(3) - 1)
+        self.udp_train_address = image.address.value + image.resolve_rip_relative(
+            text.VirtualAddress + match.start(4) - 1)
 
         if POINTER_SIZE == 8:
-            if not (match := re.search(br"\x4d\x85\xd2\x74\x0a\x49\x8b\xca\xe8(....)\xeb\x09\x48\x8b\x49\x08\xe8(....)",
-                                       text_view, re.DOTALL)):
-                raise Exception
-            self._TcpDecode = OodleNetwork1_Proto_Decode(
-                image.address.value + image.resolve_rip_relative(text.VirtualAddress + match.start(1) - 1))
-            self._UdpDecode = OodleNetwork1_Proto_Decode(
-                image.address.value + image.resolve_rip_relative(text.VirtualAddress + match.start(2) - 1))
+            match = re.search(br"\x4d\x85\xd2\x74\x0a\x49\x8b\xca\xe8(....)\xeb\x09\x48\x8b\x49\x08\xe8(....)",
+                              text_view, re.DOTALL)
+            if not match:
+                raise RuntimeError("Could not find Tcp/UdpDecode.")
+            self.tcp_decode_address = image.address.value + image.resolve_rip_relative(
+                text.VirtualAddress + match.start(1) - 1)
+            self.udp_decode_address = image.address.value + image.resolve_rip_relative(
+                text.VirtualAddress + match.start(2) - 1)
 
-            if not (
-            match := re.search(br"\x48\x85\xc0\x74\x0d\x48\x8b\xc8\xe8(....)\x48..\xeb\x0b\x48\x8b\x49\x08\xe8(....)",
-                               text_view, re.DOTALL)):
-                raise Exception
-            self._TcpEncode = OodleNetwork1_Proto_Encode(
-                image.address.value + image.resolve_rip_relative(text.VirtualAddress + match.start(1) - 1))
-            self._UdpEncode = OodleNetwork1_Proto_Encode(
-                image.address.value + image.resolve_rip_relative(text.VirtualAddress + match.start(2) - 1))
+            match = re.search(
+                br"\x48\x85\xc0\x74\x0d\x48\x8b\xc8\xe8(....)\x48..\xeb\x0b\x48\x8b\x49\x08\xe8(....)",
+                text_view, re.DOTALL)
+            if not match:
+                raise RuntimeError("Could not find Tcp/UdpEncode.")
+            self.tcp_encode_address = image.address.value + image.resolve_rip_relative(
+                text.VirtualAddress + match.start(1) - 1)
+            self.udp_encode_address = image.address.value + image.resolve_rip_relative(
+                text.VirtualAddress + match.start(2) - 1)
         else:
             pattern = re.compile(br"\x85\xc0\x74.\x50\xe8(....)\x57\x8b\xf0\xff\x15", re.DOTALL)
-            if not (match := pattern.search(text_view)):
-                raise Exception
-            self._TcpEncode = OodleNetwork1_Proto_Encode(
-                image.address.value + image.resolve_rip_relative(text.VirtualAddress + match.start(1) - 1))
-            if not (match := pattern.search(text_view, match.end())):
-                raise Exception
-            self._TcpDecode = OodleNetwork1_Proto_Encode(
-                image.address.value + image.resolve_rip_relative(text.VirtualAddress + match.start(1) - 1))
+            match = pattern.search(text_view)
+            if not match:
+                raise RuntimeError("Could not find TcpEncode.")
+            self.tcp_encode_address = image.address.value + image.resolve_rip_relative(
+                text.VirtualAddress + match.start(1) - 1)
+            match = pattern.search(text_view, match.end())
+            if not match:
+                raise RuntimeError("Could not find TcpDecode.")
+            self.tcp_decode_address = image.address.value + image.resolve_rip_relative(
+                text.VirtualAddress + match.start(1) - 1)
 
             pattern = re.compile(br"\xff\x71\x04\xe8(....)\x57\x8b\xf0\xff\x15", re.DOTALL)
-            if not (match := pattern.search(text_view)):
-                raise Exception
-            self._UdpEncode = OodleNetwork1_Proto_Encode(
-                image.address.value + image.resolve_rip_relative(text.VirtualAddress + match.start(1) - 1))
-            if not (match := pattern.search(text_view, match.end())):
-                raise Exception
-            self._UdpDecode = OodleNetwork1_Proto_Encode(
-                image.address.value + image.resolve_rip_relative(text.VirtualAddress + match.start(1) - 1))
+            match = pattern.search(text_view)
+            if not match:
+                raise RuntimeError("Could not find UdpEncode.")
+            self.udp_encode_address = image.address.value + image.resolve_rip_relative(
+                text.VirtualAddress + match.start(1) - 1)
+            match = pattern.search(text_view, match.end())
+            if not match:
+                raise RuntimeError("Could not find UdpDecode.")
+            self.udp_decode_address = image.address.value + image.resolve_rip_relative(
+                text.VirtualAddress + match.start(1) - 1)
 
-        self._c_my_malloc = Oodle_Malloc(my_malloc)
-        self._c_my_free = Oodle_Free(my_free)
+        self.set_malloc_free = Oodle_SetMallocFree(self.set_malloc_free_address)
+        self.shared_size = OodleNetwork1_Shared_Size(self.shared_size_address)
+        self.shared_set_window = OodleNetwork1_Shared_SetWindow(self.shared_set_window_address)
+        self.udp_state_size = OodleNetwork1_Proto_State_Size(self.udp_state_size_address)
+        self.tcp_state_size = OodleNetwork1_Proto_State_Size(self.tcp_state_size_address)
+        self.tcp_train = OodleNetwork1_Proto_Train(self.tcp_train_address)
+        self.udp_train = OodleNetwork1_Proto_Train(self.udp_train_address)
+        self.tcp_decode = OodleNetwork1_Proto_Decode(self.tcp_decode_address)
+        self.udp_decode = OodleNetwork1_Proto_Decode(self.udp_decode_address)
+        self.tcp_encode = OodleNetwork1_Proto_Encode(self.tcp_encode_address)
+        self.udp_encode = OodleNetwork1_Proto_Encode(self.udp_encode_address)
 
-        self._state = (ctypes.c_uint8 * self._UdpStateSize())()
-        self._SetMallocFree(self._c_my_malloc.address(), self._c_my_free.address())
-        self._shared = (ctypes.c_uint8 * self._SharedSize(htbits))()
-        self._window = (ctypes.c_uint8 * window)()
-        self._SharedSetWindow(
-            ctypes.addressof(self._shared), htbits,
+        if POINTER_SIZE == 8:
+            # patch _alloca_probe
+            pattern = br"\x48\x83\xec\x10\x4c\x89\x14\x24\x4c\x89\x5c\x24\x08\x4d\x33\xdb"
+            match = text_view.index(pattern)
+            if match == -1:
+                raise RuntimeError("_alloca_probe not found")
+            image.view[text.VirtualAddress + match] = 0xc3
+
+        else:
+            # patch fs register access
+            ctypes.memset(self.tcp_train_address + 0xaba - 0xAB0, 0x90, 6)
+            ctypes.memset(self.tcp_train_address + 0xad2 - 0xAB0, 0x90, 6)
+            ctypes.memset(self.tcp_train_address + 0xbb4 - 0xAB0, 0x90, 7)
+            ctypes.memset(self.tcp_train_address + 0xbc8 - 0xAB0, 0x90, 7)
+
+        self._c_oodle_malloc_impl = Oodle_Malloc(oodle_malloc_impl)
+        self._c_oodle_free_impl = Oodle_Free(oodle_free_impl)
+
+        self.set_malloc_free(self._c_oodle_malloc_impl.address(), self._c_oodle_free_impl.address())
+
+
+class OodleInstance:
+    def __init__(self, module: OodleModule, use_tcp: bool):
+        self._state = (ctypes.c_uint8 * (module.tcp_state_size() if use_tcp else module.udp_state_size()))()
+        self._shared = (ctypes.c_uint8 * module.shared_size(module.htbits))()
+        self._window = (ctypes.c_uint8 * module.window)()
+        module.shared_set_window(
+            ctypes.addressof(self._shared), module.htbits,
             ctypes.addressof(self._window), len(self._window))
-        self._UdpTrain(
+        (module.tcp_train if use_tcp else module.udp_train)(
             ctypes.addressof(self._state),
             ctypes.addressof(self._shared),
             ctypes.POINTER(ctypes.c_void_p)(),
             ctypes.POINTER(ctypes.c_int32)(),
             0)
+        self._encode_function = module.tcp_encode if use_tcp else module.udp_encode
+        self._decode_function = module.tcp_decode if use_tcp else module.udp_decode
 
     def encode(self, src: bytes | bytearray | memoryview) -> bytearray:
         if not isinstance(src, (bytearray, memoryview)):
             src = bytearray(src)
         enc = bytearray(len(src) + 8)
-        del enc[self._UdpEncode(
+        del enc[self._encode_function(
             ctypes.addressof(self._state),
             ctypes.addressof(self._shared),
             ctypes.addressof(ctypes.c_byte.from_buffer(src)), len(src),
@@ -721,7 +840,7 @@ class Oodle:
 
     def decode(self, enc: bytes | bytearray | memoryview, result_length: int) -> bytearray:
         dec = bytearray(result_length)
-        if not self._UdpDecode(
+        if not self._decode_function(
                 ctypes.addressof(self._state),
                 ctypes.addressof(self._shared),
                 ctypes.addressof(ctypes.c_byte.from_buffer(enc)), len(enc),
@@ -729,26 +848,28 @@ class Oodle:
             raise RuntimeError("Oodle decode fail")
         return dec
 
-    def selftest(self):
-        src = bytearray(i // 8 for i in range(256))
-        enc = self.encode(src)
-        dec = self.decode(enc, len(src))
-        if src != dec:
-            raise RuntimeError("Self-test failed")
 
+# endregion
 
 def __main__():
     if POINTER_SIZE not in (4, 8):
         raise NotImplementedError
 
     img = PeImage(pathlib.Path("ffxiv_dx11.exe" if POINTER_SIZE == 8 else "ffxiv.exe").read_bytes())
+    oodle_module = OodleModule(img)
 
-    # print(StdCallFuncType(ctypes.c_uint32, ctypes.c_uint32)(img.address.value + 0x1244700, 0x11))
-    # return 0
+    test_data = b'000003211561116515468046454464656456456456' * 16
 
-    # my_free(my_malloc(63, 8))
-    oodle = Oodle(img, 0x11)
-    oodle.selftest()
+    oodle_udp = OodleInstance(oodle_module, False)
+    if test_data != oodle_udp.decode(oodle_udp.encode(test_data), len(test_data)):
+        print("Fail UDP")
+
+    oodle_tcp1 = OodleInstance(oodle_module, True)
+    oodle_tcp2 = OodleInstance(oodle_module, True)
+    if test_data != oodle_tcp2.decode(xd := oodle_tcp1.encode(test_data), len(test_data)):
+        print("Fail TCP")
+
+    print("OK")
 
 
 if __name__ == "__main__":
