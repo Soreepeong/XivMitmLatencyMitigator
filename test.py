@@ -3,6 +3,7 @@ import ctypes.util
 import os
 import pathlib
 import re
+import secrets
 import sys
 import typing
 
@@ -792,10 +793,10 @@ class OodleModule:
         if POINTER_SIZE == 8:
             # patch _alloca_probe
             pattern = br"\x48\x83\xec\x10\x4c\x89\x14\x24\x4c\x89\x5c\x24\x08\x4d\x33\xdb"
-            match = text_view.index(pattern)
-            if match == -1:
+            match = re.search(pattern, text_view)
+            if not match:
                 raise RuntimeError("_alloca_probe not found")
-            image.view[text.VirtualAddress + match] = 0xc3
+            image.view[text.VirtualAddress + match.start(0)] = 0xc3
 
         else:
             # patch fs register access
@@ -866,8 +867,10 @@ def __main__():
 
     oodle_tcp1 = OodleInstance(oodle_module, True)
     oodle_tcp2 = OodleInstance(oodle_module, True)
-    if test_data != oodle_tcp2.decode(xd := oodle_tcp1.encode(test_data), len(test_data)):
-        print("Fail TCP")
+    while True:
+        test_data = secrets.token_bytes(16384)
+        if test_data != oodle_tcp2.decode(xd := oodle_tcp1.encode(test_data), len(test_data)):
+            print("Fail TCP")
 
     print("OK")
 

@@ -2199,10 +2199,7 @@ class Connection:
 
             dn = definition.Name
             self.opcodes = definition
-            if use_companion_program:
-                self.oodle = OodleWithCompanionProgram()
-            else:
-                self.oodle = OodleWithBudgetAbiThunks()
+            self.oodle = OodleHelper()
             self._use_oodle_tcp = definition.Common_UseOodleTcp
 
             break
