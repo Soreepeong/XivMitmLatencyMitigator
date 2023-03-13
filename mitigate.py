@@ -789,25 +789,25 @@ class ImageDosHeader(ctypes.LittleEndianStructure):
         ("e_res2", ctypes.c_uint16 * 10),
         ("e_lfanew", ctypes.c_uint32),
     )
-    e_magic: int | ctypes.c_uint16
-    e_cblp: int | ctypes.c_uint16
-    e_cp: int | ctypes.c_uint16
-    e_crlc: int | ctypes.c_uint16
-    e_cparhdr: int | ctypes.c_uint16
-    e_minalloc: int | ctypes.c_uint16
-    e_maxalloc: int | ctypes.c_uint16
-    e_ss: int | ctypes.c_uint16
-    e_sp: int | ctypes.c_uint16
-    e_csum: int | ctypes.c_uint16
-    e_ip: int | ctypes.c_uint16
-    e_cs: int | ctypes.c_uint16
-    e_lfarlc: int | ctypes.c_uint16
-    e_ovno: int | ctypes.c_uint16
-    e_res: typing.Sequence[int] | ctypes.c_uint16 * 4
-    e_oemid: int | ctypes.c_uint16
-    e_oeminfo: int | ctypes.c_uint16
-    e_res2: typing.Sequence[int] | ctypes.c_uint16 * 10
-    e_lfanew: int | ctypes.c_uint32
+    e_magic: typing.Union[int, ctypes.c_uint16]
+    e_cblp: typing.Union[int, ctypes.c_uint16]
+    e_cp: typing.Union[int, ctypes.c_uint16]
+    e_crlc: typing.Union[int, ctypes.c_uint16]
+    e_cparhdr: typing.Union[int, ctypes.c_uint16]
+    e_minalloc: typing.Union[int, ctypes.c_uint16]
+    e_maxalloc: typing.Union[int, ctypes.c_uint16]
+    e_ss: typing.Union[int, ctypes.c_uint16]
+    e_sp: typing.Union[int, ctypes.c_uint16]
+    e_csum: typing.Union[int, ctypes.c_uint16]
+    e_ip: typing.Union[int, ctypes.c_uint16]
+    e_cs: typing.Union[int, ctypes.c_uint16]
+    e_lfarlc: typing.Union[int, ctypes.c_uint16]
+    e_ovno: typing.Union[int, ctypes.c_uint16]
+    e_res: typing.Union[typing.Sequence[int], ctypes.c_uint16 * 4]
+    e_oemid: typing.Union[int, ctypes.c_uint16]
+    e_oeminfo: typing.Union[int, ctypes.c_uint16]
+    e_res2: typing.Union[typing.Sequence[int], ctypes.c_uint16 * 10]
+    e_lfanew: typing.Union[int, ctypes.c_uint32]
 
 
 class ImageFileHeader(ctypes.LittleEndianStructure):
@@ -820,13 +820,13 @@ class ImageFileHeader(ctypes.LittleEndianStructure):
         ("SizeOfOptionalHeader", ctypes.c_uint16),
         ("Characteristics", ctypes.c_uint16),
     )
-    Machine: int | ctypes.c_uint16
-    NumberOfSections: int | ctypes.c_uint16
-    TimeDateStamp: int | ctypes.c_uint32
-    PointerToSymbolTable: int | ctypes.c_uint32
-    NumberOfSymbols: int | ctypes.c_uint32
-    SizeOfOptionalHeader: int | ctypes.c_uint16
-    Characteristics: int | ctypes.c_uint16
+    Machine: typing.Union[int, ctypes.c_uint16]
+    NumberOfSections: typing.Union[int, ctypes.c_uint16]
+    TimeDateStamp: typing.Union[int, ctypes.c_uint32]
+    PointerToSymbolTable: typing.Union[int, ctypes.c_uint32]
+    NumberOfSymbols: typing.Union[int, ctypes.c_uint32]
+    SizeOfOptionalHeader: typing.Union[int, ctypes.c_uint16]
+    Characteristics: typing.Union[int, ctypes.c_uint16]
 
 
 class ImageDataDirectory(ctypes.LittleEndianStructure):
@@ -834,8 +834,8 @@ class ImageDataDirectory(ctypes.LittleEndianStructure):
         ("VirtualAddress", ctypes.c_uint32),
         ("Size", ctypes.c_uint32),
     )
-    VirtualAddress: int | ctypes.c_uint32
-    Size: int | ctypes.c_uint32
+    VirtualAddress: typing.Union[int, ctypes.c_uint32]
+    Size: typing.Union[int, ctypes.c_uint32]
 
 
 class ImageOptionalHeader32(ctypes.LittleEndianStructure):
@@ -872,37 +872,37 @@ class ImageOptionalHeader32(ctypes.LittleEndianStructure):
         ("NumberOfRvaAndSizes", ctypes.c_uint32),
         ("DataDirectory", ImageDataDirectory * IMAGE_NUMBEROF_DIRECTORY_ENTRIES),
     )
-    Magic: int | ctypes.c_uint16
-    MajorLinkerVersion: int | ctypes.c_uint8
-    MinorLinkerVersion: int | ctypes.c_uint8
-    SizeOfCode: int | ctypes.c_uint32
-    SizeOfInitializedData: int | ctypes.c_uint32
-    SizeOfUninitializedData: int | ctypes.c_uint32
-    AddressOfEntryPoint: int | ctypes.c_uint32
-    BaseOfCode: int | ctypes.c_uint32
-    BaseOfData: int | ctypes.c_uint32
-    ImageBase: int | ctypes.c_uint32
-    SectionAlignment: int | ctypes.c_uint32
-    FileAlignment: int | ctypes.c_uint32
-    MajorOperatingSystemVersion: int | ctypes.c_uint16
-    MinorOperatingSystemVersion: int | ctypes.c_uint16
-    MajorImageVersion: int | ctypes.c_uint16
-    MinorImageVersion: int | ctypes.c_uint16
-    MajorSubsystemVersion: int | ctypes.c_uint16
-    MinorSubsystemVersion: int | ctypes.c_uint16
-    Win32VersionValue: int | ctypes.c_uint32
-    SizeOfImage: int | ctypes.c_uint32
-    SizeOfHeaders: int | ctypes.c_uint32
-    CheckSum: int | ctypes.c_uint32
-    Subsystem: int | ctypes.c_uint16
-    DllCharacteristics: int | ctypes.c_uint16
-    SizeOfStackReserve: int | ctypes.c_uint32
-    SizeOfStackCommit: int | ctypes.c_uint32
-    SizeOfHeapReserve: int | ctypes.c_uint32
-    SizeOfHeapCommit: int | ctypes.c_uint32
-    LoaderFlags: int | ctypes.c_uint32
-    NumberOfRvaAndSizes: int | ctypes.c_uint32
-    DataDirectory: typing.Sequence[ImageDataDirectory] | ImageDataDirectory * IMAGE_NUMBEROF_DIRECTORY_ENTRIES
+    Magic: typing.Union[int, ctypes.c_uint16]
+    MajorLinkerVersion: typing.Union[int, ctypes.c_uint8]
+    MinorLinkerVersion: typing.Union[int, ctypes.c_uint8]
+    SizeOfCode: typing.Union[int, ctypes.c_uint32]
+    SizeOfInitializedData: typing.Union[int, ctypes.c_uint32]
+    SizeOfUninitializedData: typing.Union[int, ctypes.c_uint32]
+    AddressOfEntryPoint: typing.Union[int, ctypes.c_uint32]
+    BaseOfCode: typing.Union[int, ctypes.c_uint32]
+    BaseOfData: typing.Union[int, ctypes.c_uint32]
+    ImageBase: typing.Union[int, ctypes.c_uint32]
+    SectionAlignment: typing.Union[int, ctypes.c_uint32]
+    FileAlignment: typing.Union[int, ctypes.c_uint32]
+    MajorOperatingSystemVersion: typing.Union[int, ctypes.c_uint16]
+    MinorOperatingSystemVersion: typing.Union[int, ctypes.c_uint16]
+    MajorImageVersion: typing.Union[int, ctypes.c_uint16]
+    MinorImageVersion: typing.Union[int, ctypes.c_uint16]
+    MajorSubsystemVersion: typing.Union[int, ctypes.c_uint16]
+    MinorSubsystemVersion: typing.Union[int, ctypes.c_uint16]
+    Win32VersionValue: typing.Union[int, ctypes.c_uint32]
+    SizeOfImage: typing.Union[int, ctypes.c_uint32]
+    SizeOfHeaders: typing.Union[int, ctypes.c_uint32]
+    CheckSum: typing.Union[int, ctypes.c_uint32]
+    Subsystem: typing.Union[int, ctypes.c_uint16]
+    DllCharacteristics: typing.Union[int, ctypes.c_uint16]
+    SizeOfStackReserve: typing.Union[int, ctypes.c_uint32]
+    SizeOfStackCommit: typing.Union[int, ctypes.c_uint32]
+    SizeOfHeapReserve: typing.Union[int, ctypes.c_uint32]
+    SizeOfHeapCommit: typing.Union[int, ctypes.c_uint32]
+    LoaderFlags: typing.Union[int, ctypes.c_uint32]
+    NumberOfRvaAndSizes: typing.Union[int, ctypes.c_uint32]
+    DataDirectory: typing.Union[typing.Sequence[ImageDataDirectory], ImageDataDirectory * IMAGE_NUMBEROF_DIRECTORY_ENTRIES]
 
 
 class ImageOptionalHeader64(ctypes.LittleEndianStructure):
@@ -938,36 +938,36 @@ class ImageOptionalHeader64(ctypes.LittleEndianStructure):
         ("NumberOfRvaAndSizes", ctypes.c_uint32),
         ("DataDirectory", ImageDataDirectory * IMAGE_NUMBEROF_DIRECTORY_ENTRIES),
     )
-    Magic: int | ctypes.c_uint16
-    MajorLinkerVersion: int | ctypes.c_uint8
-    MinorLinkerVersion: int | ctypes.c_uint8
-    SizeOfCode: int | ctypes.c_uint32
-    SizeOfInitializedData: int | ctypes.c_uint32
-    SizeOfUninitializedData: int | ctypes.c_uint32
-    AddressOfEntryPoint: int | ctypes.c_uint32
-    BaseOfCode: int | ctypes.c_uint32
-    ImageBase: int | ctypes.c_uint64
-    SectionAlignment: int | ctypes.c_uint32
-    FileAlignment: int | ctypes.c_uint32
-    MajorOperatingSystemVersion: int | ctypes.c_uint16
-    MinorOperatingSystemVersion: int | ctypes.c_uint16
-    MajorImageVersion: int | ctypes.c_uint16
-    MinorImageVersion: int | ctypes.c_uint16
-    MajorSubsystemVersion: int | ctypes.c_uint16
-    MinorSubsystemVersion: int | ctypes.c_uint16
-    Win32VersionValue: int | ctypes.c_uint32
-    SizeOfImage: int | ctypes.c_uint32
-    SizeOfHeaders: int | ctypes.c_uint32
-    CheckSum: int | ctypes.c_uint32
-    Subsystem: int | ctypes.c_uint16
-    DllCharacteristics: int | ctypes.c_uint16
-    SizeOfStackReserve: int | ctypes.c_uint64
-    SizeOfStackCommit: int | ctypes.c_uint64
-    SizeOfHeapReserve: int | ctypes.c_uint64
-    SizeOfHeapCommit: int | ctypes.c_uint64
-    LoaderFlags: int | ctypes.c_uint32
-    NumberOfRvaAndSizes: int | ctypes.c_uint32
-    DataDirectory: typing.Sequence[ImageDataDirectory] | ImageDataDirectory * IMAGE_NUMBEROF_DIRECTORY_ENTRIES
+    Magic: typing.Union[int, ctypes.c_uint16]
+    MajorLinkerVersion: typing.Union[int, ctypes.c_uint8]
+    MinorLinkerVersion: typing.Union[int, ctypes.c_uint8]
+    SizeOfCode: typing.Union[int, ctypes.c_uint32]
+    SizeOfInitializedData: typing.Union[int, ctypes.c_uint32]
+    SizeOfUninitializedData: typing.Union[int, ctypes.c_uint32]
+    AddressOfEntryPoint: typing.Union[int, ctypes.c_uint32]
+    BaseOfCode: typing.Union[int, ctypes.c_uint32]
+    ImageBase: typing.Union[int, ctypes.c_uint64]
+    SectionAlignment: typing.Union[int, ctypes.c_uint32]
+    FileAlignment: typing.Union[int, ctypes.c_uint32]
+    MajorOperatingSystemVersion: typing.Union[int, ctypes.c_uint16]
+    MinorOperatingSystemVersion: typing.Union[int, ctypes.c_uint16]
+    MajorImageVersion: typing.Union[int, ctypes.c_uint16]
+    MinorImageVersion: typing.Union[int, ctypes.c_uint16]
+    MajorSubsystemVersion: typing.Union[int, ctypes.c_uint16]
+    MinorSubsystemVersion: typing.Union[int, ctypes.c_uint16]
+    Win32VersionValue: typing.Union[int, ctypes.c_uint32]
+    SizeOfImage: typing.Union[int, ctypes.c_uint32]
+    SizeOfHeaders: typing.Union[int, ctypes.c_uint32]
+    CheckSum: typing.Union[int, ctypes.c_uint32]
+    Subsystem: typing.Union[int, ctypes.c_uint16]
+    DllCharacteristics: typing.Union[int, ctypes.c_uint16]
+    SizeOfStackReserve: typing.Union[int, ctypes.c_uint64]
+    SizeOfStackCommit: typing.Union[int, ctypes.c_uint64]
+    SizeOfHeapReserve: typing.Union[int, ctypes.c_uint64]
+    SizeOfHeapCommit: typing.Union[int, ctypes.c_uint64]
+    LoaderFlags: typing.Union[int, ctypes.c_uint32]
+    NumberOfRvaAndSizes: typing.Union[int, ctypes.c_uint32]
+    DataDirectory: typing.Union[typing.Sequence[ImageDataDirectory], ImageDataDirectory * IMAGE_NUMBEROF_DIRECTORY_ENTRIES]
 
 
 class ImageNtHeaders32(ctypes.LittleEndianStructure):
@@ -976,7 +976,7 @@ class ImageNtHeaders32(ctypes.LittleEndianStructure):
         ("FileHeader", ImageFileHeader),
         ("OptionalHeader", ImageOptionalHeader32),
     )
-    Signature: int | ctypes.c_uint32
+    Signature: typing.Union[int, ctypes.c_uint32]
     FileHeader: ImageFileHeader
     OptionalHeader: ImageOptionalHeader32
 
@@ -987,7 +987,7 @@ class ImageNtHeaders64(ctypes.LittleEndianStructure):
         ("FileHeader", ImageFileHeader),
         ("OptionalHeader", ImageOptionalHeader64),
     )
-    Signature: int | ctypes.c_uint32
+    Signature: typing.Union[int, ctypes.c_uint32]
     FileHeader: ImageFileHeader
     OptionalHeader: ImageOptionalHeader64
 
@@ -1005,16 +1005,16 @@ class ImageSectionHeader(ctypes.LittleEndianStructure):
         ("NumberOfLinenumbers", ctypes.c_uint16),
         ("Characteristics", ctypes.c_uint32),
     )
-    Name: bytes | ctypes.c_char * IMAGE_SIZEOF_SHORT_NAME
-    VirtualSize: int | ctypes.c_uint32
-    VirtualAddress: int | ctypes.c_uint32
-    SizeOfRawData: int | ctypes.c_uint32
-    PointerToRawData: int | ctypes.c_uint32
-    PointerToRelocations: int | ctypes.c_uint32
-    PointerToLinenumbers: int | ctypes.c_uint32
-    NumberOfRelocations: int | ctypes.c_uint16
-    NumberOfLinenumbers: int | ctypes.c_uint16
-    Characteristics: int | ctypes.c_uint32
+    Name: typing.Union[bytes, ctypes.c_char * IMAGE_SIZEOF_SHORT_NAME]
+    VirtualSize: typing.Union[int, ctypes.c_uint32]
+    VirtualAddress: typing.Union[int, ctypes.c_uint32]
+    SizeOfRawData: typing.Union[int, ctypes.c_uint32]
+    PointerToRawData: typing.Union[int, ctypes.c_uint32]
+    PointerToRelocations: typing.Union[int, ctypes.c_uint32]
+    PointerToLinenumbers: typing.Union[int, ctypes.c_uint32]
+    NumberOfRelocations: typing.Union[int, ctypes.c_uint16]
+    NumberOfLinenumbers: typing.Union[int, ctypes.c_uint16]
+    Characteristics: typing.Union[int, ctypes.c_uint32]
 
 
 class ImageBaseRelocation(ctypes.LittleEndianStructure):
@@ -1022,8 +1022,8 @@ class ImageBaseRelocation(ctypes.LittleEndianStructure):
         ("VirtualAddress", ctypes.c_uint32),
         ("SizeOfBlock", ctypes.c_uint32),
     )
-    VirtualAddress: int | ctypes.c_uint32
-    SizeOfBlock: int | ctypes.c_uint32
+    VirtualAddress: typing.Union[int, ctypes.c_uint32]
+    SizeOfBlock: typing.Union[int, ctypes.c_uint32]
 
 
 # endregion
@@ -1082,7 +1082,7 @@ PyMemoryView_FromMemory.restype = ctypes.py_object
 # region budget windows stdcall <-> linux cdecl ABI converters
 
 class PeImage:
-    def __init__(self, data: bytearray | bytes):
+    def __init__(self, data: typing.Union[bytearray, bytes]):
         self._data = data if isinstance(data, bytearray) else bytearray(data)
 
         self.dos = ImageDosHeader.from_buffer(self._data, 0)
@@ -1096,7 +1096,7 @@ class PeImage:
         if self.nt.Signature != 0x4550:
             raise ValueError("bad nt header")
 
-        self.sections: typing.Sequence[ImageSectionHeader] | ctypes.Array[ImageSectionHeader] = (
+        self.sections: typing.Union[typing.Sequence[ImageSectionHeader], ctypes.Array[ImageSectionHeader]] = (
                 ImageSectionHeader * self.nt.FileHeader.NumberOfSections).from_buffer(
             self._data, self.dos.e_lfanew + ctypes.sizeof(self.nt))
 
@@ -1150,7 +1150,7 @@ class PeImage:
         except StopIteration:
             return KeyError
 
-    def section(self, section: bytes | ImageSectionHeader) -> memoryview:
+    def section(self, section: typing.Union[bytes, ImageSectionHeader]) -> memoryview:
         if not isinstance(section, ImageSectionHeader):
             section = self.section_header(section)
         return self.view[section.VirtualAddress:section.VirtualAddress + section.VirtualSize]
@@ -2795,7 +2795,7 @@ class OodleInstance:
         self._encode_function = module.tcp_encode if use_tcp else module.udp_encode
         self._decode_function = module.tcp_decode if use_tcp else module.udp_decode
 
-    def encode(self, src: bytes | bytearray | memoryview) -> bytearray:
+    def encode(self, src: typing.Union[bytes, bytearray, memoryview]) -> bytearray:
         if not isinstance(src, (bytearray, memoryview)):
             src = bytearray(src)
         enc = bytearray(len(src) + 8)
@@ -2806,7 +2806,7 @@ class OodleInstance:
             ctypes.addressof(ctypes.c_byte.from_buffer(enc))):]
         return enc
 
-    def decode(self, enc: bytes | bytearray | memoryview, result_length: int) -> bytearray:
+    def decode(self, enc: typing.Union[bytes, bytearray, memoryview], result_length: int) -> bytearray:
         dec = bytearray(result_length)
         if not self._decode_function(
                 ctypes.addressof(self._state),
