@@ -2572,13 +2572,21 @@ class Connection:
 def download_exe(src_url: str):
     print("Downloading:", src_url)
     with urllib.request.urlopen(src_url) as resp:
-        data = resp.read()
+        data = bytearray(resp.read())
     if data[0:2] == b'MZ':
-        with open("ffxiv.exe", "wb") as fp:
-            fp.write(data)
+        dosh = ImageDosHeader.from_buffer(data)
+        nth = ImageNtHeaders32.from_buffer(dosh.e_lfanew)
+        if nth.FileHeader.Machine == 0x014c:
+            print("x86 binary detected; treating the file as ffxiv.exe")
+            with open("ffxiv.exe", "wb") as fp:
+                fp.write(data)
+        elif nth.FileHeader.Machine == 0x8664:
+            print("x86 binary detected; treating the file as ffxiv_dx11.exe")
+            with open("ffxiv_dx11.exe", "wb") as fp:
+                fp.write(data)
         return
 
-    print("Looking for ffxiv.exe in the downloaded patch file...")
+    print("Looking for ffxiv.exe and ffxiv_dx11.exe in the downloaded patch file...")
     with io.BytesIO(data) as fp:
         fp.seek(0, os.SEEK_SET)
         fp: typing.Union[typing.BinaryIO, io.BytesIO]
@@ -2586,7 +2594,10 @@ def download_exe(src_url: str):
         if hdr.signature != ZiPatchHeader.SIGNATURE:
             raise RuntimeError("downloaded file is neither a .patch file or .exe file")
 
-        ffxiv = []
+        target_files = {
+            "ffxiv.exe": [],
+            "ffxiv_dx11.exe": [],
+        }
 
         while fp.readinto(hdr := ZiPatchChunkHeader()):
             offset = fp.tell()
@@ -2598,20 +2609,25 @@ def download_exe(src_url: str):
                 elif sqpkhdr.command == ZiPatchSqpackFileAddHeader.COMMAND:
                     fp.readinto(sqpkhdr2 := ZiPatchSqpackFileAddHeader())
                     path = fp.read(sqpkhdr2.path_size).split(b"\0", 1)[0].decode("utf-8")
-                    is_target_file = path == 'ffxiv.exe'
+                    target_file = target_files.get(path, None)
+                    chunks = []
 
                     current_file_offset = sqpkhdr2.offset
+                    if target_file is not None:
+                        if current_file_offset == 0:
+                            target_file.clear()
+                        target_file.append((current_file_offset, chunks))
                     while fp.tell() < offset + hdr.size:
                         fp.readinto(block_header := BlockHeader())
                         block_data_size = block_header.compressed_size if block_header.is_compressed() else block_header.decompressed_size
                         padded_block_size = (block_data_size + ctypes.sizeof(block_header) + 127) & 0xFFFFFF80
-                        if is_target_file:
+                        if target_file is not None:
                             x = fp.read(padded_block_size - ctypes.sizeof(block_header))[:block_data_size]
                             if block_header.is_compressed():
                                 x = zlib.decompress(x, -zlib.MAX_WBITS)
                             if len(x) != block_header.decompressed_size:
                                 raise RuntimeError("Corrupt patch file")
-                            ffxiv.append(x)
+                            chunks.append(x)
                         else:
                             fp.seek(padded_block_size - ctypes.sizeof(block_header), os.SEEK_CUR)
                         current_file_offset += block_header.decompressed_size
@@ -2634,12 +2650,19 @@ def download_exe(src_url: str):
             if hdr.type == b"EOF_":
                 break
 
-    if ffxiv:
-        with open("ffxiv.exe", "wb") as fp:
-            fp.writelines(ffxiv)
-        return
+    found_any_file = False
+    for target_file_name, target_file_data in target_files.items():
+        if not target_file_data:
+            continue
+        with open(target_file_name, "wb") as fp:
+            for offset, chunks in target_file_data:
+                fp.seek(offset, os.SEEK_SET)
+                fp.writelines(chunks)
+        print(f"Saved: {target_file_name}")
+        found_any_file = True
 
-    raise RuntimeError("downloaded patch file does not contain a .exe file")
+    if not found_any_file:
+        raise RuntimeError("downloaded patch file does not contain a .exe file")
 
 
 # endregion
@@ -2976,16 +2999,18 @@ def __main__() -> int:
                         )
     parser.add_argument("-u", "--update-opcodes", action="store_true", dest="update_opcodes", default=False,
                         help="Download new opcodes again; do not use cached opcodes file.")
-    parser.add_argument("-x", "--exe", action="store", type=str, dest="exe_url", default="",
-                        help="Download ffxiv.exe from specified URL (exe or patch file.)")
+    parser.add_argument("-x", "--exe", action="append", dest="exe_url", default=[],
+                        help="Download ffxiv.exe and/or ffxiv_dx11.exe from specified URL (exe or patch file.)")
     args: typing.Union[ArgumentTuple, argparse.Namespace] = parser.parse_args()
 
     if args.extra_delay < 0:
         logging.warning("Extra delay cannot be a negative number.")
         return -1
 
-    if args.exe_url != '':
-        download_exe(args.exe_url)
+    for url in args.exe_url:
+        url = url.strip()
+        if url:
+            download_exe(url)
 
     logging.info(f"Region filter: {', '.join(args.region) if args.region else '(None)'}")
     logging.info(f"Extra delay: {args.extra_delay}s")
@@ -2996,9 +3021,12 @@ def __main__() -> int:
         OodleWithCompanionProgram.init_executable()
         OodleHelper = OodleWithCompanionProgram
     except RuntimeError as e:
-        OodleWithBudgetAbiThunks.init_module()
-        print(f"Not using companion program: {e}")
-        OodleHelper = OodleWithBudgetAbiThunks
+        if sys.platform == 'linux':
+            OodleWithBudgetAbiThunks.init_module()
+            print(f"Not using companion program: {e}")
+            OodleHelper = OodleWithBudgetAbiThunks
+        else:
+            raise
 
     if not test_oodle():
         print("Oodle test fail")
