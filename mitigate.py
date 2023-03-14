@@ -2500,7 +2500,7 @@ def __main__() -> int:
                         os.close(rfd)
 
             for fd, event_type in poller.poll():
-                print(fd, event_type)
+                # print(fd, event_type)
                 if fd == listener.fileno():
                     if event_type & select.POLLIN:
                         sock, source = listener.accept()
@@ -2548,7 +2548,7 @@ def __main__() -> int:
                                     break
                             else:
                                 data = bytearray().join(data)
-                                print(f"Child read: {cb} bytes =>{len(data)}")
+                                # print(f"Child read: {cb} bytes =>{len(data)}")
                                 for clientfd, backlog in firehose_backlog.items():
                                     poller.modify(clientfd, select.POLLIN | select.POLLOUT | select.POLLRDHUP)
                                     backlog.append((0, data))
