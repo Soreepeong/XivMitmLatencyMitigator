@@ -7,20 +7,18 @@ import ctypes.util
 import dataclasses
 import datetime
 import enum
+import errno
 import io
 import ipaddress
 import json
 import logging.handlers
 import os
 import pathlib
-import platform
 import random
 import re
-import shlex
 import signal
 import socket
 import struct
-import subprocess
 import sys
 import time
 import typing
@@ -47,615 +45,6 @@ Feel free to increase and see how does it feel like to play on high latency inst
 
 T = typing.TypeVar("T")
 ArgumentTuple = collections.namedtuple("ArgumentTuple", ("region", "extra_delay", "measure_ping", "update_opcodes"))
-
-OODLE_HELPER_CODE = r"""#define _CRT_SECURE_NO_WARNINGS
-
-#include <cstdio>
-#include <fstream>
-#include <iostream>
-#include <limits>
-#include <span>
-#include <regex>
-#include <type_traits>
-#include <vector>
-
-#define IMAGE_NUMBEROF_DIRECTORY_ENTRIES 16
-#define IMAGE_DIRECTORY_ENTRY_BASERELOC 5
-#define IMAGE_SIZEOF_SHORT_NAME 8
-
-struct IMAGE_DOS_HEADER {
-	uint16_t e_magic;
-	uint16_t e_cblp;
-	uint16_t e_cp;
-	uint16_t e_crlc;
-	uint16_t e_cparhdr;
-	uint16_t e_minalloc;
-	uint16_t e_maxalloc;
-	uint16_t e_ss;
-	uint16_t e_sp;
-	uint16_t e_csum;
-	uint16_t e_ip;
-	uint16_t e_cs;
-	uint16_t e_lfarlc;
-	uint16_t e_ovno;
-	uint16_t e_res[4];
-	uint16_t e_oemid;
-	uint16_t e_oeminfo;
-	uint16_t e_res2[10];
-	uint32_t e_lfanew;
-};
-
-struct IMAGE_FILE_HEADER {
-	uint16_t Machine;
-	uint16_t NumberOfSections;
-	uint32_t TimeDateStamp;
-	uint32_t PointerToSymbolTable;
-	uint32_t NumberOfSymbols;
-	uint16_t SizeOfOptionalHeader;
-	uint16_t Characteristics;
-};
-
-struct IMAGE_DATA_DIRECTORY {
-	uint32_t VirtualAddress;
-	uint32_t Size;
-};
-
-struct IMAGE_OPTIONAL_HEADER32 {
-	uint16_t Magic;
-	uint8_t MajorLinkerVersion;
-	uint8_t MinorLinkerVersion;
-	uint32_t SizeOfCode;
-	uint32_t SizeOfInitializedData;
-	uint32_t SizeOfUninitializedData;
-	uint32_t AddressOfEntryPoint;
-	uint32_t BaseOfCode;
-	uint32_t BaseOfData;
-	uint32_t ImageBase;
-	uint32_t SectionAlignment;
-	uint32_t FileAlignment;
-	uint16_t MajorOperatingSystemVersion;
-	uint16_t MinorOperatingSystemVersion;
-	uint16_t MajorImageVersion;
-	uint16_t MinorImageVersion;
-	uint16_t MajorSubsystemVersion;
-	uint16_t MinorSubsystemVersion;
-	uint32_t Win32VersionValue;
-	uint32_t SizeOfImage;
-	uint32_t SizeOfHeaders;
-	uint32_t CheckSum;
-	uint16_t Subsystem;
-	uint16_t DllCharacteristics;
-	uint32_t SizeOfStackReserve;
-	uint32_t SizeOfStackCommit;
-	uint32_t SizeOfHeapReserve;
-	uint32_t SizeOfHeapCommit;
-	uint32_t LoaderFlags;
-	uint32_t NumberOfRvaAndSizes;
-	IMAGE_DATA_DIRECTORY DataDirectory[IMAGE_NUMBEROF_DIRECTORY_ENTRIES];
-};
-
-struct IMAGE_OPTIONAL_HEADER64 {
-	uint16_t Magic;
-	uint8_t MajorLinkerVersion;
-	uint8_t MinorLinkerVersion;
-	uint32_t SizeOfCode;
-	uint32_t SizeOfInitializedData;
-	uint32_t SizeOfUninitializedData;
-	uint32_t AddressOfEntryPoint;
-	uint32_t BaseOfCode;
-	uint64_t ImageBase;
-	uint32_t SectionAlignment;
-	uint32_t FileAlignment;
-	uint16_t MajorOperatingSystemVersion;
-	uint16_t MinorOperatingSystemVersion;
-	uint16_t MajorImageVersion;
-	uint16_t MinorImageVersion;
-	uint16_t MajorSubsystemVersion;
-	uint16_t MinorSubsystemVersion;
-	uint32_t Win32VersionValue;
-	uint32_t SizeOfImage;
-	uint32_t SizeOfHeaders;
-	uint32_t CheckSum;
-	uint16_t Subsystem;
-	uint16_t DllCharacteristics;
-	uint64_t SizeOfStackReserve;
-	uint64_t SizeOfStackCommit;
-	uint64_t SizeOfHeapReserve;
-	uint64_t SizeOfHeapCommit;
-	uint32_t LoaderFlags;
-	uint32_t NumberOfRvaAndSizes;
-	IMAGE_DATA_DIRECTORY DataDirectory[IMAGE_NUMBEROF_DIRECTORY_ENTRIES];
-};
-
-template<typename TOptionalHeader>
-struct IMAGE_NT_HEADERS_SIZED {
-	uint32_t Signature;
-	IMAGE_FILE_HEADER FileHeader;
-	TOptionalHeader OptionalHeader;
-};
-
-struct IMAGE_SECTION_HEADER {
-	char Name[IMAGE_SIZEOF_SHORT_NAME];
-	union {
-		uint32_t PhysicalAddress;
-		uint32_t VirtualSize;
-	} Misc;
-	uint32_t VirtualAddress;
-	uint32_t SizeOfRawData;
-	uint32_t PointerToRawData;
-	uint32_t PointerToRelocations;
-	uint32_t PointerToLinenumbers;
-	uint16_t NumberOfRelocations;
-	uint16_t NumberOfLinenumbers;
-	uint32_t Characteristics;
-};
-
-struct IMAGE_BASE_RELOCATION {
-	uint32_t VirtualAddress;
-	uint32_t SizeOfBlock;
-};
-
-#define FIELD_OFFSET(type, field)    ((int32_t)(int64_t)&(((type *)0)->field))
-#define IMAGE_FIRST_SECTION( ntheader ) ((IMAGE_SECTION_HEADER*)        \
-    ((const char*)(ntheader) +                                            \
-     FIELD_OFFSET( IMAGE_NT_HEADERS, OptionalHeader ) +                 \
-     ((ntheader))->FileHeader.SizeOfOptionalHeader   \
-    ))
-
-#if defined(_WIN64)
-#define STDCALL __stdcall
-const auto GamePath = LR"(C:\Program Files (x86)\SquareEnix\FINAL FANTASY XIV - A Realm Reborn\game\ffxiv_dx11.exe)";
-
-extern "C" void* __stdcall VirtualAlloc(void* lpAddress, size_t dwSize, uint32_t flAllocationType, uint32_t flProtect);
-void* executable_allocate(size_t size) {
-	return VirtualAlloc(nullptr, size, 0x3000 /* MEM_COMMIT | MEM_RESERVE */, 0x40 /* PAGE_EXECUTE_READWRITE */);
-}
-
-using IMAGE_NT_HEADERS = IMAGE_NT_HEADERS_SIZED<IMAGE_OPTIONAL_HEADER64>;
-
-#elif defined(_WIN32)
-#define STDCALL __stdcall
-const auto GamePath = LR"(C:\Program Files (x86)\SquareEnix\FINAL FANTASY XIV - A Realm Reborn\game\ffxiv.exe)";
-
-extern "C" void* __stdcall VirtualAlloc(void* lpAddress, size_t dwSize, uint32_t flAllocationType, uint32_t flProtect);
-void* executable_allocate(size_t size) {
-	return VirtualAlloc(nullptr, size, 0x3000 /* MEM_COMMIT | MEM_RESERVE */, 0x40 /* PAGE_EXECUTE_READWRITE */);
-}
-
-using IMAGE_NT_HEADERS = IMAGE_NT_HEADERS_SIZED<IMAGE_OPTIONAL_HEADER32>;
-
-#elif defined(__linux__)
-#define STDCALL __attribute__((stdcall))
-const auto GamePath = R"(ffxiv.exe)";
-
-#include <stdlib.h>
-#include <malloc.h>
-#include <memory.h>
-#include <unistd.h>
-#include <sys/mman.h>
-void* executable_allocate(size_t size) {
-	const auto p = memalign(sysconf(_SC_PAGE_SIZE), size);
-	mprotect(p, size, PROT_READ | PROT_WRITE | PROT_EXEC);
-	return p;
-}
-
-using IMAGE_NT_HEADERS = IMAGE_NT_HEADERS_SIZED<IMAGE_OPTIONAL_HEADER32>;
-
-#endif
-
-void* STDCALL my_malloc(size_t size, int align) {
-	const auto pRaw = (char*)malloc(size + align + sizeof(void*) - 1);
-	if (!pRaw)
-		return nullptr;
-
-	const auto pAligned = (void*)(((size_t)pRaw + align + 7) & (size_t)-align);
-	*((void**)pAligned - 1) = pRaw;
-	return pAligned;
-}
-
-void STDCALL my_free(void* p) {
-	free(*((void**)p - 1));
-}
-
-using OodleNetwork1_Shared_Size = std::remove_pointer_t<int(STDCALL*)(int htbits)>;
-using OodleNetwork1_Shared_SetWindow = std::remove_pointer_t<void(STDCALL*)(void* data, int htbits, void* window, int windowSize)>;
-using OodleNetwork1_Proto_Train = std::remove_pointer_t<void(STDCALL*)(void* state, void* shared, const void* const* trainingPacketPointers, const int* trainingPacketSizes, int trainingPacketCount)>;
-using OodleNetwork1_Proto_State_Size = std::remove_pointer_t<int(STDCALL*)(void)>;
-using OodleNetwork1_UDP_Decode = std::remove_pointer_t<bool(STDCALL*)(const void* state, void* shared, const void* compressed, size_t compressedSize, void* raw, size_t rawSize)>;
-using OodleNetwork1_UDP_Encode = std::remove_pointer_t<int(STDCALL*)(const void* state, const void* shared, const void* raw, size_t rawSize, void* compressed)>;
-using OodleNetwork1_TCP_Decode = std::remove_pointer_t<bool(STDCALL*)(void* state, void* shared, const void* compressed, size_t compressedSize, void* raw, size_t rawSize)>;
-using OodleNetwork1_TCP_Encode = std::remove_pointer_t<int(STDCALL*)(void* state, const void* shared, const void* raw, size_t rawSize, void* compressed)>;
-using Oodle_Malloc = std::remove_pointer_t<void* (STDCALL*)(size_t size, int align)>;
-using Oodle_Free = std::remove_pointer_t<void(STDCALL*)(void* p)>;
-using Oodle_SetMallocFree = std::remove_pointer_t<void(STDCALL*)(Oodle_Malloc* pfnMalloc, Oodle_Free* pfnFree)>;
-
-class ScanResult {
-	std::cmatch m_match;
-
-public:
-	ScanResult() = default;
-	ScanResult(const ScanResult&) = default;
-	ScanResult(ScanResult&&) noexcept = default;
-	ScanResult& operator=(const ScanResult&) = default;
-	ScanResult& operator=(ScanResult&&) noexcept = default;
-
-	ScanResult(std::cmatch match)
-		: m_match(std::move(match)) {
-	}
-
-	template<typename T>
-	T& Get(size_t matchIndex) const {
-		return *reinterpret_cast<T*>(const_cast<void*>(static_cast<const void*>(m_match[matchIndex].first)));
-	}
-
-	template<typename T>
-	T* ResolveAddress(size_t matchIndex) const {
-		return reinterpret_cast<T*>(m_match[matchIndex].first + 4 + Get<int32_t>(matchIndex));
-	}
-
-	template<typename T = void>
-	T* begin(size_t matchIndex) {
-		return reinterpret_cast<T*>(const_cast<void*>(static_cast<const void*>(&*m_match[matchIndex].first)));
-	}
-
-	template<typename T = void>
-	void* end(size_t matchIndex) {
-		return reinterpret_cast<T*>(const_cast<void*>(static_cast<const void*>(&*m_match[matchIndex].second)));
-	}
-};
-
-class RegexSignature {
-	const std::regex m_pattern;
-
-public:
-	template<size_t Length>
-	RegexSignature(const char(&data)[Length])
-		: m_pattern{ data, data + Length - 1 } {
-	}
-
-	bool Lookup(const void* data, size_t length, ScanResult& result, bool next = false) const {
-		std::cmatch match;
-
-		if (next) {
-			const auto end = static_cast<const char*>(data) + length;
-			const auto prevEnd = result.end(0);
-			if (prevEnd >= end)
-				return false;
-			data = prevEnd;
-		}
-
-		if (!std::regex_search(static_cast<const char*>(data), static_cast<const char*>(data) + length, match, m_pattern))
-			return false;
-
-		result = ScanResult(std::move(match));
-		return true;
-	}
-
-	template<typename T>
-	bool Lookup(std::span<T> data, ScanResult& result, bool next = false) const {
-		return Lookup(data.data(), data.size_bytes(), result, next);
-	}
-};
-
-template<typename T>
-void DisplaceBy(T*& what, size_t offset) {
-	what = reinterpret_cast<T*>(reinterpret_cast<char*>(what) + offset);
-}
-
-struct OodleXiv {
-	int HtBits;
-	int Window;
-	void* BaseAddress;
-	OodleNetwork1_Shared_Size* SharedSize;
-	Oodle_SetMallocFree* SetMallocFree;
-	OodleNetwork1_Shared_SetWindow* SharedSetWindow;
-	OodleNetwork1_Proto_State_Size* UdpStateSize;
-	OodleNetwork1_Proto_State_Size* TcpStateSize;
-	OodleNetwork1_Proto_Train* TcpTrain;
-	OodleNetwork1_Proto_Train* UdpTrain;
-	OodleNetwork1_TCP_Decode* TcpDecode;
-	OodleNetwork1_UDP_Decode* UdpDecode;
-	OodleNetwork1_TCP_Encode* TcpEncode;
-	OodleNetwork1_UDP_Encode* UdpEncode;
-	bool Ready = false;
-
-	bool Lookup(std::span<char> virt) {
-		if (Ready) {
-			if (BaseAddress != virt.data()) {
-				const auto displacement = reinterpret_cast<intptr_t>(virt.data()) - reinterpret_cast<intptr_t>(BaseAddress);
-				BaseAddress = virt.data();
-
-				DisplaceBy(SharedSize, displacement);
-				DisplaceBy(SetMallocFree, displacement);
-				DisplaceBy(SharedSetWindow, displacement);
-				DisplaceBy(UdpStateSize, displacement);
-				DisplaceBy(TcpStateSize, displacement);
-				DisplaceBy(TcpTrain, displacement);
-				DisplaceBy(UdpTrain, displacement);
-				DisplaceBy(TcpDecode, displacement);
-				DisplaceBy(UdpDecode, displacement);
-				DisplaceBy(TcpEncode, displacement);
-				DisplaceBy(UdpEncode, displacement);
-			}
-			return true;
-		}
-
-#ifdef _WIN64
-		const auto InitOodle = RegexSignature(R"(\x75[\s\S]\x48\x8d\x15[\s\S][\s\S][\s\S][\s\S]\x48\x8d\x0d[\s\S][\s\S][\s\S][\s\S]\xe8([\s\S][\s\S][\s\S][\s\S])\xc6\x05[\s\S][\s\S][\s\S][\s\S]\x01[\s\S]{0,256}\x75[\s\S]\xb9([\s\S][\s\S][\s\S][\s\S])\xe8([\s\S][\s\S][\s\S][\s\S])\x45\x33\xc0\x33\xd2\x48\x8b\xc8\xe8[\s\S][\s\S][\s\S][\s\S][\s\S]{0,6}\x41\xb9([\s\S][\s\S][\s\S][\s\S])\xba[\s\S][\s\S][\s\S][\s\S][\s\S]{0,6}\x48\x8b\xc8\xe8([\s\S][\s\S][\s\S][\s\S]))");
-#else
-		const auto InitOodle = RegexSignature(R"(\x75\x16\x68[\s\S][\s\S][\s\S][\s\S]\x68[\s\S][\s\S][\s\S][\s\S]\xe8([\s\S][\s\S][\s\S][\s\S])\xc6\x05[\s\S][\s\S][\s\S][\s\S]\x01[\s\S]{0,256}\x75\x27\x6a([\s\S])\xe8([\s\S][\s\S][\s\S][\s\S])\x6a\x00\x6a\x00\x50\xe8[\s\S][\s\S][\s\S][\s\S]\x83\xc4[\s\S]\x89\x46[\s\S]\x68([\s\S][\s\S][\s\S][\s\S])\xff\x76[\s\S]\x6a[\s\S]\x50\xe8([\s\S][\s\S][\s\S][\s\S]))");
-#endif
-		if (ScanResult sr; InitOodle.Lookup(virt, sr)) {
-			SetMallocFree = sr.ResolveAddress<Oodle_SetMallocFree>(1);
-			HtBits = sr.Get<uint8_t>(2);
-			SharedSize = sr.ResolveAddress<OodleNetwork1_Shared_Size>(3);
-			Window = sr.Get<uint32_t>(4);
-			SharedSetWindow = sr.ResolveAddress<OodleNetwork1_Shared_SetWindow>(5);
-		} else
-			return false;
-
-#ifdef _WIN64
-		const auto SetUpStatesAndTrain = RegexSignature(R"(\x75\x04\x48\x89\x7e[\s\S]\xe8([\s\S][\s\S][\s\S][\s\S])\x4c[\s\S][\s\S]\xe8([\s\S][\s\S][\s\S][\s\S])[\s\S]{0,256}\x01\x75\x0a\x48\x8b\x0f\xe8([\s\S][\s\S][\s\S][\s\S])\xeb\x09\x48\x8b\x4f\x08\xe8([\s\S][\s\S][\s\S][\s\S]))");
-#else
-		const auto SetUpStatesAndTrain = RegexSignature(R"(\xe8([\s\S][\s\S][\s\S][\s\S])\x8b\xd8\xe8([\s\S][\s\S][\s\S][\s\S])\x83\x7d\x10\x01[\s\S]{0,256}\x83\x7d\x10\x01\x6a\x00\x6a\x00\x6a\x00\xff\x77[\s\S]\x75\x09\xff[\s\S]\xe8([\s\S][\s\S][\s\S][\s\S])\xeb\x08\xff\x76[\s\S]\xe8([\s\S][\s\S][\s\S][\s\S]))");
-#endif
-		if (ScanResult sr; SetUpStatesAndTrain.Lookup(virt, sr)) {
-			UdpStateSize = sr.ResolveAddress<OodleNetwork1_Proto_State_Size>(1);
-			TcpStateSize = sr.ResolveAddress<OodleNetwork1_Proto_State_Size>(2);
-			TcpTrain = sr.ResolveAddress<OodleNetwork1_Proto_Train>(3);
-			UdpTrain = sr.ResolveAddress<OodleNetwork1_Proto_Train>(4);
-		} else
-			return false;
-
-#ifdef _WIN64
-		const auto DecodeOodle = RegexSignature(R"(\x4d\x85\xd2\x74\x0a\x49\x8b\xca\xe8([\s\S][\s\S][\s\S][\s\S])\xeb\x09\x48\x8b\x49\x08\xe8([\s\S][\s\S][\s\S][\s\S]))");
-		const auto EncodeOodle = RegexSignature(R"(\x48\x85\xc0\x74\x0d\x48\x8b\xc8\xe8([\s\S][\s\S][\s\S][\s\S])\x48[\s\S][\s\S]\xeb\x0b\x48\x8b\x49\x08\xe8([\s\S][\s\S][\s\S][\s\S]))");
-		if (ScanResult sr1, sr2; DecodeOodle.Lookup(virt, sr1) && EncodeOodle.Lookup(virt, sr2)) {
-			TcpDecode = sr1.ResolveAddress<OodleNetwork1_TCP_Decode>(1);
-			UdpDecode = sr1.ResolveAddress<OodleNetwork1_UDP_Decode>(2);
-			TcpEncode = sr2.ResolveAddress<OodleNetwork1_TCP_Encode>(1);
-			UdpEncode = sr2.ResolveAddress<OodleNetwork1_UDP_Encode>(2);
-		} else
-			return false;
-#else
-		const auto TcpCodecOodle = RegexSignature(R"(\x85\xc0\x74[\s\S]\x50\xe8([\s\S][\s\S][\s\S][\s\S])\x57\x8b\xf0\xff\x15)");
-		const auto UdpCodecOodle = RegexSignature(R"(\xff\x71\x04\xe8([\s\S][\s\S][\s\S][\s\S])\x57\x8b\xf0\xff\x15)");
-		if (ScanResult sr1, sr2; TcpCodecOodle.Lookup(virt, sr1) && UdpCodecOodle.Lookup(virt, sr2)) {
-			TcpEncode = sr1.ResolveAddress<OodleNetwork1_TCP_Encode>(1);
-			UdpEncode = sr2.ResolveAddress<OodleNetwork1_UDP_Encode>(1);
-			// NOTE: compressed buffer size must be (8 + input.size)
-
-			if (TcpCodecOodle.Lookup(virt, sr1, true) && UdpCodecOodle.Lookup(virt, sr2, true)) {
-				TcpDecode = sr1.ResolveAddress<OodleNetwork1_TCP_Decode>(1);
-				UdpDecode = sr2.ResolveAddress<OodleNetwork1_UDP_Decode>(1);
-			} else
-				return false;
-		} else
-			return false;
-#endif
-
-		BaseAddress = virt.data();
-		Ready = true;
-		return true;
-	}
-};
-
-class Oodle {
-	OodleXiv m_oodleXiv;
-
-	std::vector<uint8_t> m_shared;
-	std::vector<uint8_t> m_state;
-	std::vector<uint8_t> m_window;
-
-	bool m_isTcp{};
-
-public:
-	Oodle() = default;
-	Oodle(Oodle&&) noexcept = default;
-	Oodle(const Oodle&) = delete;
-	Oodle& operator=(Oodle&&) noexcept = default;
-	Oodle& operator=(const Oodle&) = delete;
-
-	void SetupUdp(const OodleXiv& oodleXiv) {
-		m_oodleXiv = oodleXiv;
-		m_isTcp = false;
-
-		m_shared.clear();
-		m_state.clear();
-		m_window.clear();
-		m_shared.resize(m_oodleXiv.SharedSize(m_oodleXiv.HtBits));
-		m_state.resize(m_oodleXiv.UdpStateSize());
-		m_window.resize(m_oodleXiv.Window);
-
-		m_oodleXiv.SharedSetWindow(&m_shared[0], m_oodleXiv.HtBits, &m_window[0], m_oodleXiv.Window);
-		m_oodleXiv.UdpTrain(&m_state[0], &m_shared[0], nullptr, nullptr, 0);
-	}
-
-	void SetupTcp(const OodleXiv& oodleXiv) {
-		m_oodleXiv = oodleXiv;
-		m_isTcp = true;
-
-		m_shared.clear();
-		m_state.clear();
-		m_window.clear();
-		m_shared.resize(m_oodleXiv.SharedSize(m_oodleXiv.HtBits));
-		m_state.resize(m_oodleXiv.TcpStateSize());
-		m_window.resize(m_oodleXiv.Window);
-
-		m_oodleXiv.SharedSetWindow(&m_shared[0], m_oodleXiv.HtBits, &m_window[0], m_oodleXiv.Window);
-		m_oodleXiv.TcpTrain(&m_state[0], &m_shared[0], nullptr, nullptr, 0);
-	}
-
-	size_t Encode(const void* source, size_t sourceLength, void* target, size_t targetLength) {
-		if (targetLength < CompressedBufferSizeNeeded(sourceLength))
-			return (std::numeric_limits<size_t>::max)();
-
-		if (m_isTcp)
-			return m_oodleXiv.TcpEncode(m_state.data(), m_shared.data(), source, sourceLength, target);
-		else
-			return m_oodleXiv.UdpEncode(m_state.data(), m_shared.data(), source, sourceLength, target);
-	}
-
-	size_t Decode(const void* source, size_t sourceLength, void* target, size_t targetLength) {
-		if (m_isTcp)
-			return m_oodleXiv.TcpDecode(m_state.data(), m_shared.data(), source, sourceLength, target, targetLength);
-		else
-			return m_oodleXiv.UdpDecode(m_state.data(), m_shared.data(), source, sourceLength, target, targetLength);
-	}
-
-	static size_t CompressedBufferSizeNeeded(size_t n) {
-		return n + 8;
-	}
-};
-
-int main() {
-	freopen(NULL, "rb", stdin);
-	freopen(NULL, "wb", stdout);
-
-	std::ifstream game(GamePath, std::ios::binary);
-	game.seekg(0, std::ios::end);
-	std::vector<char> buf((static_cast<size_t>(game.tellg()) + 3) / 4 * 4);
-	game.seekg(0, std::ios::beg);
-	game.read(&buf[0], buf.size());
-
-	auto simplehash = static_cast<uint32_t>(buf.size());
-	for (size_t i = 0; i < buf.size(); i += 4)
-	    simplehash ^= *reinterpret_cast<uint32_t*>(&buf[i]);
-
-	const auto& dosh = *(IMAGE_DOS_HEADER*)(&buf[0]);
-	const auto& nth = *(IMAGE_NT_HEADERS*)(&buf[dosh.e_lfanew]);
-
-	std::span<char> virt((char*)executable_allocate(nth.OptionalHeader.SizeOfImage), nth.OptionalHeader.SizeOfImage);
-	fprintf(stderr, "Base: 0x%zX\n", (size_t)virt.data());
-
-	const auto ddoff = dosh.e_lfanew + sizeof(uint32_t) + sizeof(IMAGE_FILE_HEADER) + nth.FileHeader.SizeOfOptionalHeader;
-	memcpy(&virt[0], &buf[0], ddoff + sizeof(IMAGE_SECTION_HEADER) * nth.FileHeader.NumberOfSections);
-	for (const auto& s : std::span((IMAGE_SECTION_HEADER*)&buf[ddoff], nth.FileHeader.NumberOfSections)) {
-		const auto src = std::span(&buf[s.PointerToRawData], s.SizeOfRawData);
-		const auto dst = std::span(&virt[s.VirtualAddress], s.Misc.VirtualSize);
-		memcpy(&dst[0], &src[0], std::min(src.size(), dst.size()));
-	}
-
-	const auto base = nth.OptionalHeader.ImageBase;
-	for (size_t i = nth.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].VirtualAddress,
-		i_ = i + nth.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].Size;
-		i < i_; ) {
-		const auto& page = *(IMAGE_BASE_RELOCATION*)&virt[i];
-		for (const auto relo : std::span((uint16_t*)(&page + 1), (page.SizeOfBlock - sizeof page) / 2)) {
-			if ((relo >> 12) == 0)
-				void();
-			else if ((relo >> 12) == 3)
-				*(uint32_t*)&virt[(size_t)page.VirtualAddress + (relo & 0xFFF)] += (uint32_t)((size_t)&virt[0] - base);
-			else if ((relo >> 12) == 10)
-				*(uint64_t*)&virt[(size_t)page.VirtualAddress + (relo & 0xFFF)] += (uint64_t)((size_t)&virt[0] - base);
-			else
-				std::abort();
-		}
-
-		i += page.SizeOfBlock;
-	}
-
-	char cacheFileName[256];
-	snprintf(cacheFileName, sizeof cacheFileName, "ffxiv.sig.%08x.dat", simplehash);
-
-	OodleXiv oodleXiv{};
-
-	auto writeAfterLookup = true;
-	if (const auto fprev = fopen(cacheFileName, "rb")) {
-		fread(&oodleXiv, sizeof oodleXiv, 1, fprev);
-		fclose(fprev);
-
-		writeAfterLookup = !oodleXiv.Ready;
-	}
-
-	if (!oodleXiv.Lookup(virt)) {
-		fprintf(stderr, "Failed to look for signatures.\n");
-		return -1;
-	} else {
-		fprintf(stderr, "All signatures resolved.\n");
-
-		fprintf(stderr, "htbits: 0x%zX\n", oodleXiv.HtBits);
-		fprintf(stderr, "window size: 0x%zX\n", oodleXiv.Window);
-		fprintf(stderr, "SharedSize: ffxiv.exe+0x%zX\n", reinterpret_cast<const char*>(oodleXiv.SharedSize) - virt.data());
-		fprintf(stderr, "SetMallocFree: ffxiv.exe+0x%zX\n", reinterpret_cast<const char*>(oodleXiv.SetMallocFree) - virt.data());
-		fprintf(stderr, "SharedSetWindow: ffxiv.exe+0x%zX\n", reinterpret_cast<const char*>(oodleXiv.SharedSetWindow) - virt.data());
-		fprintf(stderr, "UdpStateSize: ffxiv.exe+0x%zX\n", reinterpret_cast<const char*>(oodleXiv.UdpStateSize) - virt.data());
-		fprintf(stderr, "TcpStateSize: ffxiv.exe+0x%zX\n", reinterpret_cast<const char*>(oodleXiv.TcpStateSize) - virt.data());
-		fprintf(stderr, "TcpTrain: ffxiv.exe+0x%zX\n", reinterpret_cast<const char*>(oodleXiv.TcpTrain) - virt.data());
-		fprintf(stderr, "UdpTrain: ffxiv.exe+0x%zX\n", reinterpret_cast<const char*>(oodleXiv.UdpTrain) - virt.data());
-		fprintf(stderr, "TcpDecode: ffxiv.exe+0x%zX\n", reinterpret_cast<const char*>(oodleXiv.TcpDecode) - virt.data());
-		fprintf(stderr, "UdpDecode: ffxiv.exe+0x%zX\n", reinterpret_cast<const char*>(oodleXiv.UdpDecode) - virt.data());
-		fprintf(stderr, "TcpEncode: ffxiv.exe+0x%zX\n", reinterpret_cast<const char*>(oodleXiv.TcpEncode) - virt.data());
-		fprintf(stderr, "UdpEncode: ffxiv.exe+0x%zX\n", reinterpret_cast<const char*>(oodleXiv.UdpEncode) - virt.data());
-	}
-
-	if (writeAfterLookup) {
-		const auto f = fopen(cacheFileName, "wb");
-		if (f) {
-			fwrite(&oodleXiv, sizeof oodleXiv, 1, f);
-			fclose(f);
-		}
-	}
-
-	memset(reinterpret_cast<char*>(oodleXiv.TcpTrain) + 0xaba - 0xAB0, 0x90, 6);
-	memset(reinterpret_cast<char*>(oodleXiv.TcpTrain) + 0xad2 - 0xAB0, 0x90, 6);
-	memset(reinterpret_cast<char*>(oodleXiv.TcpTrain) + 0xbb4 - 0xAB0, 0x90, 7);
-	memset(reinterpret_cast<char*>(oodleXiv.TcpTrain) + 0xbc8 - 0xAB0, 0x90, 7);
-
-	oodleXiv.SetMallocFree(&my_malloc, &my_free);
-
-	Oodle oodleUdp;
-	oodleUdp.SetupUdp(oodleXiv);
-
-	Oodle oodleTcp[4];
-	for (auto& o : oodleTcp)
-		o.SetupTcp(oodleXiv);
-
-	fprintf(stderr, "Oodle helper running.\n");
-
-	std::vector<uint8_t> src, dst;
-	while (true) {
-		struct my_header_t {
-			uint32_t SourceLength;
-			uint32_t TargetLength;
-			uint32_t Channel;
-		} hdr{};
-		static_assert(sizeof(my_header_t) == 12);
-
-		fread(&hdr, sizeof(hdr), 1, stdin);
-		if (!hdr.SourceLength)
-			return 0;
-
-		src.resize(hdr.SourceLength);
-		fread(&src[0], 1, src.size(), stdin);
-
-		if (hdr.TargetLength == 0xFFFFFFFFu) {
-			dst.resize(Oodle::CompressedBufferSizeNeeded(src.size()));
-			if (hdr.Channel == 0xFFFFFFFFu)
-				dst.resize(oodleUdp.Encode(src.data(), src.size(), dst.data(), dst.size()));
-			else if (hdr.Channel < 4)
-				dst.resize(oodleTcp[hdr.Channel].Encode(src.data(), src.size(), dst.data(), dst.size()));
-			else
-				dst.resize(0);
-
-		} else {
-			dst.resize(hdr.TargetLength);
-			auto ok = false;
-			if (hdr.Channel == 0xFFFFFFFFu)
-				ok = oodleUdp.Decode(src.data(), src.size(), dst.data(), dst.size());
-			else if (hdr.Channel < 4)
-				ok = oodleTcp[hdr.Channel].Decode(src.data(), src.size(), dst.data(), dst.size());
-			if (!ok) {
-				dst.resize(0);
-				dst.resize(hdr.TargetLength);
-			}
-		}
-		uint32_t size = (uint32_t)dst.size();
-		fwrite(&size, sizeof(size), 1, stdout);
-		fwrite(&dst[0], 1, dst.size(), stdout);
-		fflush(stdout);
-	}
-}"""
 
 
 def clamp(v: T, min_: T, max_: T) -> T:
@@ -1249,13 +638,13 @@ class StdCallFunc32ByFunctionPointer:
         self._argtypes = argtypes
         self._codelen = 1 + sum((ctypes.sizeof(argtype) + 3) // 4 * 5 for argtype in argtypes) + 8
         self._noargtypefn = noargtypefn
+        self._codeptr = allocate_executable_memory(self._codelen)
 
     def address(self):
         return ctypes.c_void_p(self._ptr)
 
     def __call__(self, *args):
-        codeptr = allocate_executable_memory(self._codelen)
-        buf = (ctypes.c_uint8 * self._codelen).from_address(codeptr.value)
+        buf = (ctypes.c_uint8 * self._codelen).from_address(self._codeptr.value)
         buf[0] = 0x90
         i = 1
         for argtype, arg in zip(reversed(self._argtypes), reversed(args)):
@@ -1280,13 +669,12 @@ class StdCallFunc32ByFunctionPointer:
                 buf[i + 4] = argb[3] if j + 3 <= arglen else 0
                 i += 5
         buf[i] = 0xb8
-        ctypes.c_uint32.from_address(codeptr.value + i + 1).value = self._ptr
+        ctypes.c_uint32.from_address(self._codeptr.value + i + 1).value = self._ptr
         buf[i + 5] = 0xff
         buf[i + 6] = 0xd0
         buf[i + 7] = 0xc3
 
-        res = self._noargtypefn(codeptr.value)()
-        free_executable_memory(codeptr)
+        res = self._noargtypefn(self._codeptr.value)()
 
         return res
 
@@ -1344,25 +732,22 @@ class StdCallFunc64ByFunctionPointer:
         cmds.append(b"\xc3")  # ret
 
         self._template = bytearray().join(cmds)
+        self._codeptr = allocate_executable_memory(len(self._template))
+        ctypes.memmove(self._codeptr.value,
+                       ctypes.addressof(ctypes.c_uint8.from_buffer(self._template)),
+                       len(self._template))
 
     def address(self):
         return ctypes.c_void_p(self._ptr)
 
     def __call__(self, *args):
-        codeptr = allocate_executable_memory(len(self._template))
-        ctypes.memmove(codeptr.value,
-                       ctypes.addressof(ctypes.c_uint8.from_buffer(self._template)),
-                       len(self._template))
-
-        cmd = self._template
         for argtype, arg, offset in zip(self._argtypes, args, self._offsets):
             arglen = ctypes.sizeof(argtype)
             if not isinstance(arg, argtype):
                 arg = argtype(arg)
-            ctypes.memmove(codeptr.value + offset, ctypes.addressof(arg), arglen)
+            ctypes.memmove(self._codeptr.value + offset, ctypes.addressof(arg), arglen)
 
-        res = self._noargtypefn(codeptr.value)()
-        free_executable_memory(codeptr)
+        res = self._noargtypefn(self._codeptr.value)()
         return res
 
 
@@ -2051,22 +1436,29 @@ def load_definitions(update_opcodes: bool):
     return definitions
 
 
-def load_rules(port: int, definitions: typing.List[OpcodeDefinition]) -> typing.Set[str]:
+def load_rules(port: int, definitions: typing.List[OpcodeDefinition], nftables: bool) -> typing.Set[str]:
     rules = set()
     for definition in definitions:
         for iprange in definition.Server_IpRange:
-            rule = [
-                "-p tcp",
-                "-m multiport",
-                "--dports", ",".join(str(port1) if port1 == port2 else f"{port1}:{port2}"
-                                     for port1, port2 in definition.Server_PortRange)
-            ]
-            if isinstance(iprange, ipaddress.IPv4Network):
-                rule += ["-d", str(iprange)]
+            if nftables:
+                if isinstance(iprange, ipaddress.IPv4Network):
+                    rule = f"ip daddr {iprange}"
+                else:
+                    rule = f"ip daddr {iprange[0]}-{iprange[1]}"
+                for port1, port2 in definition.Server_PortRange:
+                    rules.add(f"{rule} tcp dport {port1}-{port2}")
             else:
-                rule += ["-m", "iprange", "--dst-range", f"{iprange[0]}-{iprange[1]}"]
-            rule.append(f"-j REDIRECT --to {port}")
-            rules.add(" ".join(rule))
+                rule = [
+                    "-p tcp",
+                    "-m multiport",
+                    "--dports", ",".join(str(port1) if port1 == port2 else f"{port1}:{port2}"
+                                         for port1, port2 in definition.Server_PortRange)
+                ]
+                if isinstance(iprange, ipaddress.IPv4Network):
+                    rule += ["-d", str(iprange)]
+                else:
+                    rule += ["-m", "iprange", "--dst-range", f"{iprange[0]}-{iprange[1]}"]
+                rules.add(" ".join(rule))
     return rules
 
 
@@ -2145,8 +1537,10 @@ class Connection:
     opcodes: typing.Optional[OpcodeDefinition]
 
     def __init__(self, sock: socket.socket, source: typing.Tuple[str, int],
-                 definitions: typing.List[OpcodeDefinition], args: ArgumentTuple):
+                 definitions: typing.List[OpcodeDefinition], args: ArgumentTuple,
+                 firehose_write_fd: int):
         self.args = args
+        self.firehose_write_fd = firehose_write_fd
 
         log_path = f"/tmp/xmlm.{datetime.datetime.now():%Y%m%d%H%M%S}.{os.getpid()}.log"
         logging.basicConfig(level=logging.INFO, force=True,
@@ -2404,16 +1798,16 @@ class Connection:
                 self.upstream.connect((str(self.destination[0]), self.destination[1]))
                 self.upstream.settimeout(None)
 
-                check_targets = {
-                    self.downstream: SocketSet(0, self.downstream, self.upstream, "D->U", self.to_upstream),
-                    self.upstream: SocketSet(2, self.upstream, self.downstream, "U->D", self.to_downstream),
-                }
+                check_targets = (
+                    (self.downstream, SocketSet(0, self.downstream, self.upstream, "D->U", self.to_upstream)),
+                    (self.upstream, SocketSet(2, self.upstream, self.downstream, "U->D", self.to_downstream)),
+                )
                 while True:
                     rlist = [
-                        k for k, v in check_targets.items() if v.incoming is not None
+                        k for k, v in check_targets if v.incoming is not None
                     ]
                     wlist = [
-                        k for k, v in check_targets.items() if v.outgoing
+                        k for k, v in check_targets if v.outgoing
                     ]
                     if not rlist and not wlist:
                         break
@@ -2422,7 +1816,7 @@ class Connection:
                     if not rlist and not wlist:  # timeout or empty
                         break
 
-                    for target in check_targets.values():
+                    for direction, (_, target) in enumerate(check_targets):
                         if target.source in rlist:
                             try:
                                 data = target.source.recv(65536)
@@ -2462,6 +1856,21 @@ class Connection:
                                             message_bytes.extend(message_data)
 
                                         bundle_header.decoded_body_length = len(message_bytes)
+                                        bundle_header.message_count = len(messages)
+
+                                        if self.firehose_write_fd != -1:
+                                            original_compression = bundle_header.compression
+                                            bundle_header.compression = 0
+                                            bundle_header.length = ctypes.sizeof(bundle_header) + len(message_bytes)
+                                            os.write(self.firehose_write_fd,
+                                                     (8 + bundle_header.length).to_bytes(4, "little"))
+                                            os.write(self.firehose_write_fd, direction.to_bytes(8, "little"))
+
+                                            # noinspection PyTypeChecker
+                                            os.write(self.firehose_write_fd, bytes(bundle_header))
+                                            os.write(self.firehose_write_fd, message_bytes)
+                                            bundle_header.compression = original_compression
+
                                         if bundle_header.compression == 1:
                                             message_bytes = zlib.compress(message_bytes)
                                         elif bundle_header.compression == 2:
@@ -2469,14 +1878,13 @@ class Connection:
                                                 target.oodle_tcp_base_channel + 1 if self._use_oodle_tcp else 0xFFFFFFFF,
                                                 message_bytes)
 
-                                        bundle_header.message_count = len(messages)
                                         bundle_header.length = ctypes.sizeof(bundle_header) + len(message_bytes)
 
                                         # noinspection PyTypeChecker
                                         target.outgoing.extend(bytes(bundle_header))
                                         target.outgoing.extend(message_bytes)
 
-                    for target in check_targets.values():
+                    for direction, target in check_targets:
                         if target.outgoing is None:
                             continue
                         if target.outgoing:
@@ -2856,60 +2264,6 @@ class BaseOodleHelper:
         raise NotImplementedError
 
 
-class OodleWithCompanionProgram(BaseOodleHelper):
-    oodle_helper_path: typing.ClassVar[typing.Optional[str]] = None
-    _process: typing.Optional[subprocess.Popen] = None
-
-    def __enter__(self):
-        self._process = subprocess.Popen(self.oodle_helper_path, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self._process.kill()
-        self._process = None
-
-    def encode(self, channel: int, data: bytes) -> bytes:
-        self._process: subprocess.Popen
-        self._process.stdin.write(b''.join((
-            int.to_bytes(len(data), 4, "little"),
-            b'\xFF\xFF\xFF\xFF',
-            int.to_bytes(channel, 4, "little"),
-            data)))
-        self._process.stdin.flush()
-
-        reslen = int.from_bytes(self._process.stdout.read(4), "little")
-        return self._process.stdout.read(reslen)
-
-    def decode(self, channel: int, data: bytes, declen: int) -> bytes:
-        self._process: subprocess.Popen
-        self._process.stdin.write(b''.join((
-            int.to_bytes(len(data), 4, "little"),
-            int.to_bytes(declen, 4, "little"),
-            int.to_bytes(channel, 4, "little"),
-            data)))
-        self._process.stdin.flush()
-
-        reslen = int.from_bytes(self._process.stdout.read(4), "little")
-        return self._process.stdout.read(reslen)
-
-    @classmethod
-    def init_executable(cls):
-        if not os.path.exists("ffxiv.exe"):
-            raise RuntimeError("Need ffxiv.exe in the same directory. "
-                               "Copy one from your local Windows/Mac installation.")
-
-        cls.oodle_helper_path = os.path.dirname(__file__) + "/oodle_helper"
-        with open(cls.oodle_helper_path + ".cpp", "w") as fp:
-            fp.write(OODLE_HELPER_CODE)
-        if platform.machine() not in ('i386', 'x86_64'):
-            raise RuntimeError("Need to be able to run x86 binary natively")
-        if os.system(f"g++ {shlex.quote(cls.oodle_helper_path)}.cpp -o {shlex.quote(cls.oodle_helper_path)}"
-                     f" -std=c++20 -g -Og -m32"):
-            os.unlink(cls.oodle_helper_path + ".cpp")
-            raise RuntimeError("Failed to compile helper")
-        os.unlink(cls.oodle_helper_path + ".cpp")
-
-
 class OodleWithBudgetAbiThunks(BaseOodleHelper):
     _module: typing.ClassVar[typing.Optional[OodleModule]] = None
 
@@ -2950,7 +2304,7 @@ class OodleWithBudgetAbiThunks(BaseOodleHelper):
             cls._module = OodleModule(PeImage(pathlib.Path("ffxiv_dx11.exe").read_bytes()))
 
 
-OodleHelper = BaseOodleHelper
+OodleHelper = OodleWithBudgetAbiThunks
 
 
 def test_oodle():
@@ -3001,6 +2355,13 @@ def __main__() -> int:
                         help="Download new opcodes again; do not use cached opcodes file.")
     parser.add_argument("-x", "--exe", action="append", dest="exe_url", default=[],
                         help="Download ffxiv.exe and/or ffxiv_dx11.exe from specified URL (exe or patch file.)")
+<<<<<<< Updated upstream
+=======
+    parser.add_argument("-n", "--nftables", action="store_true", dest="nftables", default=False,
+                        help="Use nft instead of iptables.")
+    parser.add_argument("--firehose", action="store", dest="firehose", default=None,
+                        help="Open a TCP listening socket that will receive all decoded game networking data transferred. (ex: 0.0.0.0:1234)")
+>>>>>>> Stashed changes
     args: typing.Union[ArgumentTuple, argparse.Namespace] = parser.parse_args()
 
     if args.extra_delay < 0:
@@ -3016,6 +2377,7 @@ def __main__() -> int:
     logging.info(f"Extra delay: {args.extra_delay}s")
     logging.info(f"Use measured socket latency: {'yes' if args.measure_ping else 'no'}")
 
+<<<<<<< Updated upstream
     global OodleHelper
     try:
         OodleWithCompanionProgram.init_executable()
@@ -3027,12 +2389,35 @@ def __main__() -> int:
             OodleHelper = OodleWithBudgetAbiThunks
         else:
             raise
+=======
+    if sys.platform == 'linux':
+        OodleWithBudgetAbiThunks.init_module()
+    else:
+        logging.warning("Only linux is supported at the moment.")
+        return -1
+>>>>>>> Stashed changes
 
     if not test_oodle():
         print("Oodle test fail")
         return -1
 
+    poller = select.poll()
+
+    if args.firehose:
+        firehose_listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        poller.register(firehose_listener.fileno(), select.POLLIN)
+        ip, port = args.firehose.split(":")
+        port = int(port)
+        firehose_listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        firehose_listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        firehose_listener.bind((ip, port))
+        firehose_listener.listen(32)
+        logging.info(f"Firehose listening on {firehose_listener.getsockname()}...")
+    else:
+        firehose_listener = None
+
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    poller.register(listener.fileno(), select.POLLIN)
     if hasattr(socket, "TCP_NODELAY"):
         listener.setsockopt(socket.SOL_TCP, socket.TCP_NODELAY, 1)
     if hasattr(socket, "TCP_QUICKACK"):
@@ -3049,88 +2434,240 @@ def __main__() -> int:
     if args.region:
         definitions = [x for x in definitions if any(r.lower() in x.Name.lower() for r in args.region)]
 
-    applied_rules = []
-    err = False
+    removal_cmds = []
+    err = 0
     is_child = False
     cleanup_filename = os.path.basename(__file__) + ".cleanup.sh"
     if os.path.exists(cleanup_filename):
         os.system(cleanup_filename)
+
+    child_pid_to_rfd: typing.Dict[int, int] = {}
+    child_rfds: typing.Set[int] = set()
+    firehose_clients: typing.Dict[int, socket.socket] = {}
+    firehose_backlog: typing.Dict[int, typing.Deque[typing.Tuple[int, bytearray]]] = {}
+
     try:
         with open(cleanup_filename, "w") as fp:
             fp.write("#!/bin/sh\n")
-            for rule in load_rules(port, definitions):
-                iptables_cmd = f"iptables -t nat -I PREROUTING {rule}"
-                logging.info(f"Running: {iptables_cmd}")
-                if os.system(iptables_cmd):
+            for i, rule in enumerate(load_rules(port, definitions, args.nftables)):
+                if args.nftables:
+                    add_cmd = f"nft rule ip nat PREROUTING {rule} dnat 127.0.0.1:{port} comment XMLM_{os.getpid()}_{i}_"
+                else:
+                    add_cmd = f"iptables -t nat -I PREROUTING {rule} -j REDIRECT --to {port}"
+                logging.info(f"Running: {add_cmd}")
+                if os.system(add_cmd):
                     raise RootRequiredError
-                applied_rules.append(rule)
-                fp.write(f"iptables -t nat -D PREROUTING {rule}\n")
+
+                if args.nftables:
+                    h = os.popen(f"nft --handle list ruleset | grep XMLM_{os.getpid()}_{i}_").read().strip().split(" ")[-1]
+                    remove_cmd = f"nft delete rule ip nat PREROUTING handle {h}"
+                else:
+                    remove_cmd = f"iptables -t nat -D PREROUTING {rule} -j REDIRECT --to {port}"
+                removal_cmds.append(remove_cmd)
+                fp.write(f"{remove_cmd}\n")
+
+            if args.nftables:
+                if os.system(f"nft rule ip filter INPUT tcp dport {port} accept comment XMLM_{os.getpid()}_P"):
+                    raise RootRequiredError
+                h = os.popen(f"nft --handle list ruleset | grep XMLM_{os.getpid()}_P").read().strip().split(" ")[-1]
+                remove_cmd = f"nft delete rule ip nat PREROUTING handle {h}"
+                removal_cmds.append(remove_cmd)
+                fp.write(f"{remove_cmd}\n")
         os.chmod(cleanup_filename, 0o777)
 
+        removal_cmds.append("sysctl -w " + os.popen("sysctl net.ipv4.ip_forward")
+                            .read().strip().replace(" ", ""))
         os.system("sysctl -w net.ipv4.ip_forward=1")
 
-        listener.listen(8)
+        removal_cmds.append("sysctl -w " + os.popen("sysctl net.ipv4.conf.all.route_localnet")
+                            .read().strip().replace(" ", ""))
+        os.system("sysctl -w net.ipv4.conf.all.route_localnet=1")
+
+        listener.listen(32)
         logging.info(f"Listening on {listener.getsockname()}...")
         logging.info("Press Ctrl+C to quit.")
 
-        child_pids = set()
-
         def on_child_exit(signum, frame):
-            if child_pids:
+            if child_pid_to_rfd:
                 pid, status = os.waitpid(-1, os.WNOHANG)
                 if pid:
                     logging.info(f"[{pid:<6}] has exit with status code {status}.")
-                    child_pids.discard(pid)
+                    fd = child_pid_to_rfd.pop(pid, None)
+                    if fd is not None:
+                        try:
+                            poller.unregister(fd)
+                        except KeyError:
+                            pass
 
         signal.signal(signal.SIGCHLD, on_child_exit)
 
         while True:
-            for child_pid in child_pids:
+            for child_pid in child_pid_to_rfd:
                 try:
                     os.kill(child_pid, 0)
                 except OSError:
-                    child_pids.remove(child_pid)
-            try:
-                sock, source = listener.accept()
-            except KeyboardInterrupt:
-                break
+                    rfd = child_pid_to_rfd.pop(child_pid, None)
+                    if rfd is not None:
+                        child_rfds.discard(rfd)
+                        try:
+                            poller.unregister(rfd)
+                        except KeyError:
+                            pass
+                        os.close(rfd)
 
-            child_pid = os.fork()
-            if child_pid == 0:
-                is_child = True
-                child_pids.clear()
-                listener.close()
-                return Connection(sock, source, definitions, args).run()
-            sock.close()
-            child_pids.add(child_pid)
+            for fd, event_type in poller.poll():
+                print(fd, event_type)
+                if fd == listener.fileno():
+                    if event_type & select.POLLIN:
+                        sock, source = listener.accept()
 
-        for child_pid in child_pids:
+                        if firehose_listener is None:
+                            rfd = wfd = -1
+                        else:
+                            rfd, wfd = os.pipe()
+
+                        child_pid = os.fork()
+                        if child_pid == 0:
+                            is_child = True
+                            child_pid_to_rfd.clear()
+                            listener.close()
+                            if firehose_listener is not None:
+                                os.close(rfd)
+                                firehose_listener.close()
+                                for c in firehose_clients.values():
+                                    c.close()
+                                firehose_clients.clear()
+                                firehose_backlog.clear()
+
+                            return Connection(sock, source, definitions, args, wfd).run()
+
+                        sock.close()
+                        if wfd != -1:
+                            os.close(wfd)
+                        if rfd != -1:
+                            poller.register(rfd, select.POLLIN)
+                            child_pid_to_rfd[child_pid] = rfd
+                            child_rfds.add(rfd)
+
+                elif fd in child_rfds:
+                    if event_type & select.POLLIN:
+                        try:
+                            data = [os.read(fd, 4)]
+                            cb = int.from_bytes(data[0], "little")
+
+                            offset = 0
+                            while offset < cb:
+                                data.append(os.read(fd, cb - offset))
+                                offset += len(data[-1])
+                                if not len(data[-1]):
+                                    print("Child read fail")
+                                    break
+                            else:
+                                data = bytearray().join(data)
+                                print(f"Child read: {cb} bytes =>{len(data)}")
+                                for clientfd, backlog in firehose_backlog.items():
+                                    poller.modify(clientfd, select.POLLIN | select.POLLOUT | select.POLLRDHUP)
+                                    backlog.append((0, data))
+                        except OSError:
+                            pass
+
+                    elif event_type & select.POLLHUP:
+                        try:
+                            poller.unregister(fd)
+                        except KeyError:
+                            pass
+
+                elif firehose_listener is not None and fd == firehose_listener.fileno():
+                    if event_type & select.POLLIN:
+                        try:
+                            sock, source = firehose_listener.accept()
+                            firehose_clients[sock.fileno()] = sock
+                            firehose_backlog[sock.fileno()] = collections.deque()
+                            poller.register(sock.fileno(), select.POLLRDHUP | select.POLLIN)
+                            sock.setblocking(False)
+                        except OSError:
+                            pass
+
+                elif fd in firehose_clients:
+                    abandon_sock = bool(event_type & (select.POLLRDHUP | select.POLLHUP))
+                    try:
+                        sock = firehose_clients[fd]
+
+                        if event_type & select.POLLIN:
+                            while True:
+                                try:
+                                    recv_data = sock.recv(4096)
+                                except socket.error as e:
+                                    if e.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
+                                        break
+                                    raise
+                                if not recv_data:
+                                    break
+                                firehose_backlog[fd].append((0, bytearray().join((
+                                    int.to_bytes(len(recv_data) + 8, 4, "little"),
+                                    b'\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF',
+                                    recv_data,
+                                ))))
+                                poller.modify(fd, select.POLLIN | select.POLLOUT | select.POLLRDHUP)
+
+                        if event_type & select.POLLOUT:
+                            sock = firehose_clients[fd]
+                            while firehose_backlog[fd]:
+                                offset, data = firehose_backlog[fd][0]
+                                while offset < len(data):
+                                    try:
+                                        sent = sock.send(data)
+                                        if not sent:
+                                            break
+                                        offset += sent
+                                    except socket.error as e:
+                                        if e.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
+                                            break
+                                        raise
+                                if offset == len(data):
+                                    firehose_backlog[fd].popleft()
+                                else:
+                                    firehose_backlog[fd][0] = offset, data
+                            else:
+                                poller.modify(fd, select.POLLRDHUP | select.POLLIN)
+                    except socket.error as e:
+                        print(e)
+                        abandon_sock = True
+
+                    if abandon_sock:
+                        poller.unregister(fd)
+                        firehose_backlog.pop(fd)
+                        firehose_clients.pop(fd).close()
+
+    except RootRequiredError:
+        logging.error("This program requires root permissions.\n")
+        err = -1
+
+    except KeyboardInterrupt:
+        pass
+
+    finally:
+        for child_pid in child_pid_to_rfd.keys():
             try:
                 os.kill(child_pid, signal.SIGINT)
             except OSError:
                 pass
 
-    except RootRequiredError:
-        logging.error("This program requires root permissions.\n")
-        err = True
-
-    finally:
         if not is_child:
             logging.info("Cleaning up...")
-            for rule in applied_rules:
-                iptables_cmd = f"iptables -t nat -D PREROUTING {rule}"
-                logging.info(f"Running: {iptables_cmd}")
-                exit_code = os.system(iptables_cmd)
+            for removal_cmd in removal_cmds:
+                logging.info(f"Running: {removal_cmd}")
+                exit_code = os.system(removal_cmd)
                 if exit_code:
                     logging.warning(f"\t=> Failed with exit code {exit_code}")
-                    err = True
+                    err = -1
             os.remove(cleanup_filename)
             if err:
                 logging.error("One or more error have occurred during cleanup.")
-                return -1
+                err = -1
             else:
                 logging.info("Cleanup complete.")
-                return 0
+    return err
 
 
 if __name__ == "__main__":
