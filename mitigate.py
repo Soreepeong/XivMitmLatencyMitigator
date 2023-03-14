@@ -2355,13 +2355,11 @@ def __main__() -> int:
                         help="Download new opcodes again; do not use cached opcodes file.")
     parser.add_argument("-x", "--exe", action="append", dest="exe_url", default=[],
                         help="Download ffxiv.exe and/or ffxiv_dx11.exe from specified URL (exe or patch file.)")
-<<<<<<< Updated upstream
-=======
     parser.add_argument("-n", "--nftables", action="store_true", dest="nftables", default=False,
                         help="Use nft instead of iptables.")
     parser.add_argument("--firehose", action="store", dest="firehose", default=None,
                         help="Open a TCP listening socket that will receive all decoded game networking data transferred. (ex: 0.0.0.0:1234)")
->>>>>>> Stashed changes
+
     args: typing.Union[ArgumentTuple, argparse.Namespace] = parser.parse_args()
 
     if args.extra_delay < 0:
@@ -2377,25 +2375,11 @@ def __main__() -> int:
     logging.info(f"Extra delay: {args.extra_delay}s")
     logging.info(f"Use measured socket latency: {'yes' if args.measure_ping else 'no'}")
 
-<<<<<<< Updated upstream
-    global OodleHelper
-    try:
-        OodleWithCompanionProgram.init_executable()
-        OodleHelper = OodleWithCompanionProgram
-    except RuntimeError as e:
-        if sys.platform == 'linux':
-            OodleWithBudgetAbiThunks.init_module()
-            print(f"Not using companion program: {e}")
-            OodleHelper = OodleWithBudgetAbiThunks
-        else:
-            raise
-=======
     if sys.platform == 'linux':
         OodleWithBudgetAbiThunks.init_module()
     else:
         logging.warning("Only linux is supported at the moment.")
         return -1
->>>>>>> Stashed changes
 
     if not test_oodle():
         print("Oodle test fail")
