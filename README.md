@@ -64,17 +64,19 @@ If you're running Windows, you can use [XivAlexander addon](https://github.com/S
 10. Configure your gaming device to use the virtual machine to route game traffic, replacing `<vm_ip>` with the equivalent of `192.168.0.5` on above output.
     * **Windows**: Run a `Command Prompt` as Administrator, and then run the following.
       ```
-      route add 204.2.229.0 mask 255.255.255.0 <vm_ip>
       route add 124.150.157.0 mask 255.255.255.0 <vm_ip>
-      route add 183.111.189.0 mask 255.255.255.0 <vm_ip>
-      route add 195.82.50.0 mask 255.255.255.0 <vm_ip>
+      route add 153.254.80.0 mask 255.255.255.0 <vm_ip>
+      route add 202.67.52.0 mask 255.255.255.0 <vm_ip>
+      route add 204.2.29.0 mask 255.255.255.0 <vm_ip>
+      route add 80.239.145.0 mask 255.255.255.0 <vm_ip>
       ```
     * **Mac**: Run a `Terminal`, and the run the following.
       ```
-      sudo route -n add -net 204.2.229.0/24 <vm_ip>
       sudo route -n add -net 124.150.157.0/24 <vm_ip>
-      sudo route -n add -net 183.111.189.0/24 <vm_ip>
-      sudo route -n add -net 195.82.50.0/24 <vm_ip>
+      sudo route -n add -net 153.254.80.0/24 <vm_ip>
+      sudo route -n add -net 202.67.52.0/24 <vm_ip>
+      sudo route -n add -net 204.2.29.0/24 <vm_ip>
+      sudo route -n add -net 80.239.145.0/24 <vm_ip>
       ```
     * **PS4**: Set up Static IP ([Guide](https://www.linksys.com/gb/support-article?articleNum=216429)), but use `<vm_ip>` instead for `Default Gateway`.
 11. Run the game and see things get printed in the virtual machine, and if it does, it's working.
