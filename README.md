@@ -52,36 +52,33 @@ If you're running Windows, you can use [XivAlexander addon](https://github.com/S
 6. Run `iptables -t nat -A POSTROUTING -s <local_ip> -o <device_name> -j MASQUERADE`, replacing:
    * `<device_name>` with the equivalent of `eth0` on above output.
    * `<local_ip>` with the equivalent of `192.168.0.5/24` on above output.
-7. Copy `ffxiv.exe` from your local Windows/Mac game installation into the VM.
-   * Download and run [HFS](https://www.rejetto.com/hfs/?f=dl), and then drag `ffxiv.exe` into its main interface.
+7. Copy `ffxiv.exe` if VM is x86 or `ffxiv_dx11.exe` if VM is x64 from your local Windows/Mac game installation into the VM.
+   * Download and run [HFS](https://www.rejetto.com/hfs/?f=dl), and then drag `ffxiv.exe` or `ffxiv_dx11.exe` into its main interface.
    * You should be able to download that by typing `curl -O ffxiv.exe http://<HFS-IP>/ffxiv.exe`, replacing `<HFS-IP>`
      with the displayed IP address from HFS.
-8. Install gcc(g++) with 32-bit libraries.
-   * For Arch, do `pacman -S gcc`
-   * For Debian/Ubuntu, do `apt install g++ gcc-multilib g++-multilib`.
-   * If this fails due to `not enough free space`, then you will have to install the operating system instead of running this on an installation media.
-9. Run `curl https://raw.githubusercontent.com/Soreepeong/XivMitmLatencyMitigator/main/mitigate.py | python`
-10. Configure your gaming device to use the virtual machine to route game traffic, replacing `<vm_ip>` with the equivalent of `192.168.0.5` on above output.
-    * **Windows**: Run a `Command Prompt` as Administrator, and then run the following.
-      ```
-      route add 124.150.157.0 mask 255.255.255.0 <vm_ip>
-      route add 153.254.80.0 mask 255.255.255.0 <vm_ip>
-      route add 202.67.52.0 mask 255.255.255.0 <vm_ip>
-      route add 204.2.29.0 mask 255.255.255.0 <vm_ip>
-      route add 80.239.145.0 mask 255.255.255.0 <vm_ip>
-      ```
-    * **Mac**: Run a `Terminal`, and the run the following.
-      ```
-      sudo route -n add -net 124.150.157.0/24 <vm_ip>
-      sudo route -n add -net 153.254.80.0/24 <vm_ip>
-      sudo route -n add -net 202.67.52.0/24 <vm_ip>
-      sudo route -n add -net 204.2.29.0/24 <vm_ip>
-      sudo route -n add -net 80.239.145.0/24 <vm_ip>
-      ```
-    * **PS4**: Set up Static IP ([Guide](https://www.linksys.com/gb/support-article?articleNum=216429)), but use `<vm_ip>` instead for `Default Gateway`.
-11. Run the game and see things get printed in the virtual machine, and if it does, it's working.
+   * Copy both files if you're not sure.
+8. Run `curl https://raw.githubusercontent.com/Soreepeong/XivMitmLatencyMitigator/main/mitigate.py | python`
+9. Configure your gaming device to use the virtual machine to route game traffic, replacing `<vm_ip>` with the equivalent of `192.168.0.5` on above output.
+   * **Windows**: Run a `Command Prompt` as Administrator, and then run the following.
+     ```
+     route add 124.150.157.0 mask 255.255.255.0 <vm_ip>
+     route add 153.254.80.0 mask 255.255.255.0 <vm_ip>
+     route add 202.67.52.0 mask 255.255.255.0 <vm_ip>
+     route add 204.2.29.0 mask 255.255.255.0 <vm_ip>
+     route add 80.239.145.0 mask 255.255.255.0 <vm_ip>
+     ```
+   * **Mac**: Run a `Terminal`, and the run the following.
+     ```
+     sudo route -n add -net 124.150.157.0/24 <vm_ip>
+     sudo route -n add -net 153.254.80.0/24 <vm_ip>
+     sudo route -n add -net 202.67.52.0/24 <vm_ip>
+     sudo route -n add -net 204.2.29.0/24 <vm_ip>
+     sudo route -n add -net 80.239.145.0/24 <vm_ip>
+     ```
+   * **PS4**: Set up Static IP ([Guide](https://www.linksys.com/gb/support-article?articleNum=216429)), but use `<vm_ip>` instead for `Default Gateway`.
+10. Run the game and see things get printed in the virtual machine, and if it does, it's working.
     * ![](img/running.png)
-12. When you're done, you can force quit the virtual machine without "safe" procedures.
+11. When you're done, you can force quit the virtual machine without "safe" procedures.
 
 ## License
 Apache License 2.0
