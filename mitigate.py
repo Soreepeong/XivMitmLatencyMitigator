@@ -36,6 +36,7 @@ ACTION_ID_AUTO_ATTACK_MCH = 0x0008
 AUTO_ATTACK_DELAY = 0.1
 SO_ORIGINAL_DST = 80
 OPCODE_DEFINITION_LIST_URL = "https://api.github.com/repos/Soreepeong/XivAlexander/contents/StaticData/OpcodeDefinition"
+SCRIPT_DIRECTORY = os.path.dirname(os.path.abspath(__file__))
 
 EXTRA_DELAY_HELP = """Server responses have been usually taking between 50ms and 100ms on below-1ms latency to server, so 75ms is a good average.
 The server will do sanity check on the frequency of action use requests,
@@ -1404,13 +1405,14 @@ class OpcodeDefinition:
 
 
 def load_definitions(update_opcodes: bool):
-    if os.path.exists("definitions.json"):
+    definitions_filepath = os.path.join(SCRIPT_DIRECTORY, "definitions.json")
+    if os.path.exists(definitions_filepath):
         try:
             if update_opcodes:
                 raise RuntimeError("Force update requested")
-            if os.path.getmtime("definitions.json") + 60 * 60 < time.time():
+            if os.path.getmtime(definitions_filepath) + 60 * 60 < time.time():
                 raise RuntimeError("Definitions file older than an hour")
-            with open("definitions.json", "r") as fp:
+            with open(definitions_filepath, "r") as fp:
                 return [OpcodeDefinition.from_dict(x) for x in json.load(fp)]
         except Exception as e:
             logging.info(f"Failed to read previous opcode definition files: {e}")
@@ -1430,7 +1432,7 @@ def load_definitions(update_opcodes: bool):
             definitions_raw.append(data)
     except Exception as e:
         raise RuntimeError(f"Failed to load opcode definition") from e
-    with open("definitions.json", "w") as fp:
+    with open(definitions_filepath, "w") as fp:
         json.dump(definitions_raw, fp)
     definitions = [OpcodeDefinition.from_dict(x) for x in definitions_raw]
     return definitions
@@ -2290,18 +2292,20 @@ class OodleWithBudgetAbiThunks(BaseOodleHelper):
 
     @classmethod
     def init_module(cls):
+        ffxiv_exe_filepath = os.path.join(SCRIPT_DIRECTORY, "ffxiv.exe")
+        ffxiv_dx11_exe_filepath = os.path.join(SCRIPT_DIRECTORY, "ffxiv_dx11.exe")
         if POINTER_SIZE == 4:
-            if not os.path.exists("ffxiv.exe"):
+            if not os.path.exists(ffxiv_exe_filepath):
                 raise RuntimeError("Need ffxiv.exe in the same directory. "
                                    "Copy one from your local Windows/Mac installation.")
 
-            cls._module = OodleModule(PeImage(pathlib.Path("ffxiv.exe").read_bytes()))
+            cls._module = OodleModule(PeImage(pathlib.Path(ffxiv_exe_filepath).read_bytes()))
         elif POINTER_SIZE == 8:
-            if not os.path.exists("ffxiv_dx11.exe"):
+            if not os.path.exists(ffxiv_dx11_exe_filepath):
                 raise RuntimeError("Need ffxiv_dx11.exe in the same directory. "
                                    "Copy one from your local Windows/Mac installation.")
 
-            cls._module = OodleModule(PeImage(pathlib.Path("ffxiv_dx11.exe").read_bytes()))
+            cls._module = OodleModule(PeImage(pathlib.Path(ffxiv_dx11_exe_filepath).read_bytes()))
 
 
 OodleHelper = OodleWithBudgetAbiThunks
@@ -2421,9 +2425,9 @@ def __main__() -> int:
     removal_cmds = []
     err = 0
     is_child = False
-    cleanup_filename = os.path.basename(__file__) + ".cleanup.sh"
-    if os.path.exists(cleanup_filename):
-        os.system(cleanup_filename)
+    cleanup_filepath = os.path.join(SCRIPT_DIRECTORY, ".cleanup.sh")
+    if os.path.exists(cleanup_filepath):
+        os.system(cleanup_filepath)
 
     child_pid_to_rfd: typing.Dict[int, int] = {}
     child_rfds: typing.Set[int] = set()
@@ -2431,7 +2435,7 @@ def __main__() -> int:
     firehose_backlog: typing.Dict[int, typing.Deque[typing.Tuple[int, bytearray]]] = {}
 
     try:
-        with open(cleanup_filename, "w") as fp:
+        with open(cleanup_filepath, "w") as fp:
             fp.write("#!/bin/sh\n")
             for i, rule in enumerate(load_rules(port, definitions, args.nftables)):
                 if args.nftables:
@@ -2457,7 +2461,7 @@ def __main__() -> int:
                 remove_cmd = f"nft delete rule ip nat PREROUTING handle {h}"
                 removal_cmds.append(remove_cmd)
                 fp.write(f"{remove_cmd}\n")
-        os.chmod(cleanup_filename, 0o777)
+        os.chmod(cleanup_filepath, 0o777)
 
         removal_cmds.append("sysctl -w " + os.popen("sysctl net.ipv4.ip_forward")
                             .read().strip().replace(" ", ""))
@@ -2645,7 +2649,7 @@ def __main__() -> int:
                 if exit_code:
                     logging.warning(f"\t=> Failed with exit code {exit_code}")
                     err = -1
-            os.remove(cleanup_filename)
+            os.remove(cleanup_filepath)
             if err:
                 logging.error("One or more error have occurred during cleanup.")
                 err = -1
