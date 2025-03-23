@@ -31,6 +31,7 @@ import zlib
 import configparser
 
 # region Miscellaneous constants and typedefs
+# this script is for containers only (XIVOmega) 
 
 ACTION_ID_AUTO_ATTACK = 0x0007
 ACTION_ID_AUTO_ATTACK_MCH = 0x0008
@@ -2534,13 +2535,13 @@ def __main__() -> int:
                 fp.write(f"{remove_cmd}\n")
         os.chmod(cleanup_filepath, 0o777)
 
-        removal_cmds.append("sysctl -w " + os.popen("sysctl net.ipv4.ip_forward")
-                            .read().strip().replace(" ", ""))
-        os.system("sysctl -w net.ipv4.ip_forward=1")
+        #removal_cmds.append("sysctl -w " + os.popen("sysctl net.ipv4.ip_forward")
+        #                    .read().strip().replace(" ", ""))
+        os.system("echo already part of the container - sysctl net.ipv4.ip_forward")
 
-        removal_cmds.append("sysctl -w " + os.popen("sysctl net.ipv4.conf.all.route_localnet")
-                            .read().strip().replace(" ", ""))
-        os.system("sysctl -w net.ipv4.conf.all.route_localnet=1")
+        #removal_cmds.append("sysctl -w " + os.popen("sysctl net.ipv4.conf.all.route_localnet")
+        #                    .read().strip().replace(" ", ""))
+        os.system("echo already part of the container - sysctl net.ipv4.conf.all.route_localnet")
 
         listener.listen(32)
         logging.info(f"Listening on {listener.getsockname()}...")
