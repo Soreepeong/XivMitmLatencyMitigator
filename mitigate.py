@@ -45,7 +45,10 @@ This addon is already in gray area. Do NOT decrease this value. You've been warn
 Feel free to increase and see how does it feel like to play on high latency instead, though."""
 
 T = typing.TypeVar("T")
-ArgumentTuple = collections.namedtuple("ArgumentTuple", ("region", "extra_delay", "measure_ping", "update_opcodes"))
+ArgumentTuple = collections.namedtuple(
+    "ArgumentTuple",
+    ("region", "extra_delay", "measure_ping", "update_opcodes", "write_sysctl", "json_path")
+)
 
 
 def clamp(v: T, min_: T, max_: T) -> T:
@@ -292,7 +295,10 @@ class ImageOptionalHeader32(ctypes.LittleEndianStructure):
     SizeOfHeapCommit: typing.Union[int, ctypes.c_uint32]
     LoaderFlags: typing.Union[int, ctypes.c_uint32]
     NumberOfRvaAndSizes: typing.Union[int, ctypes.c_uint32]
-    DataDirectory: typing.Union[typing.Sequence[ImageDataDirectory], ImageDataDirectory * IMAGE_NUMBEROF_DIRECTORY_ENTRIES]
+    DataDirectory: typing.Union[
+        typing.Sequence[ImageDataDirectory],
+        ImageDataDirectory * IMAGE_NUMBEROF_DIRECTORY_ENTRIES,
+    ]
 
 
 class ImageOptionalHeader64(ctypes.LittleEndianStructure):
@@ -357,7 +363,10 @@ class ImageOptionalHeader64(ctypes.LittleEndianStructure):
     SizeOfHeapCommit: typing.Union[int, ctypes.c_uint64]
     LoaderFlags: typing.Union[int, ctypes.c_uint32]
     NumberOfRvaAndSizes: typing.Union[int, ctypes.c_uint32]
-    DataDirectory: typing.Union[typing.Sequence[ImageDataDirectory], ImageDataDirectory * IMAGE_NUMBEROF_DIRECTORY_ENTRIES]
+    DataDirectory: typing.Union[
+        typing.Sequence[ImageDataDirectory],
+        ImageDataDirectory * IMAGE_NUMBEROF_DIRECTORY_ENTRIES,
+    ]
 
 
 class ImageNtHeaders32(ctypes.LittleEndianStructure):
@@ -1337,7 +1346,6 @@ class XivBundleHeader(ctypes.LittleEndianStructure):
 
 @dataclasses.dataclass
 class OpcodeDefinition:
-    Name: str
     C2S_ActionRequest: int
     C2S_ActionRequestGroundTargeted: int
     S2C_ActionEffect01: int
@@ -1404,7 +1412,11 @@ class OpcodeDefinition:
                 or opcode == self.S2C_ActionEffect32)
 
 
-def load_definitions(update_opcodes: bool):
+def load_definitions(update_opcodes: bool, json_path: typing.Optional[str]) -> typing.List[OpcodeDefinition]:
+    if json_path is not None and json_path.strip() != "":
+        with open(json_path) as fp:
+            return [OpcodeDefinition.from_dict(json.load(fp))]
+
     definitions_filepath = os.path.join(SCRIPT_DIRECTORY, "definitions.json")
     if os.path.exists(definitions_filepath):
         try:
@@ -2354,7 +2366,7 @@ def __main__() -> int:
 
     parser = argparse.ArgumentParser("XivMitmLatencyMitigator: https://github.com/Soreepeong/XivMitmLatencyMitigator")
     parser.add_argument("-r", "--region", action="append", dest="region", default=[], choices=("JP", "CN", "KR"),
-                        help="Filters connection by regions. Can be specified multiple times.")
+                        help="Filters connection by regions. Can be specified multiple times. Does nothing if -j is specified.")
     parser.add_argument("-e", "--extra-delay", action="store", dest="extra_delay", default=0.075, type=float,
                         help=EXTRA_DELAY_HELP)
     parser.add_argument("-m", "--measure-ping", action="store_true", dest="measure_ping", default=False,
@@ -2362,12 +2374,16 @@ def __main__() -> int:
                         )
     parser.add_argument("-u", "--update-opcodes", action="store_true", dest="update_opcodes", default=False,
                         help="Download new opcodes again; do not use cached opcodes file.")
+    parser.add_argument("-j", "--json-path", action="store", dest="json_path", default=None,
+                        help="Read opcode definition JSON file from the given path.")
     parser.add_argument("-x", "--exe", action="append", dest="exe_url", default=[],
                         help="Download ffxiv.exe and/or ffxiv_dx11.exe from specified URL (exe or patch file.)")
     parser.add_argument("-n", "--nftables", action="store_true", dest="nftables", default=False,
                         help="Use nft instead of iptables.")
     parser.add_argument("--firehose", action="store", dest="firehose", default=None,
                         help="Open a TCP listening socket that will receive all decoded game networking data transferred. (ex: 0.0.0.0:1234)")
+    parser.add_argument("--no-sysctl", action="store_false", dest="write_sysctl", default=True,
+                        help="Do not change sysctl ip_forward and route_localnet.")
 
     args: typing.Union[ArgumentTuple, argparse.Namespace] = parser.parse_args()
 
@@ -2380,14 +2396,18 @@ def __main__() -> int:
         if url:
             download_exe(url)
 
-    logging.info(f"Region filter: {', '.join(args.region) if args.region else '(None)'}")
+    if args.json_path:
+        logging.info(f"Opcode definition JSON file path: {args.json_path}")
+    else:
+        logging.info(f"Region filter: {', '.join(args.region) if args.region else '(None)'}")
     logging.info(f"Extra delay: {args.extra_delay}s")
     logging.info(f"Use measured socket latency: {'yes' if args.measure_ping else 'no'}")
+    logging.info(f"Write sysctl values: {'yes' if args.write_sysctl else 'no'}")
 
     if sys.platform == 'linux':
         OodleWithBudgetAbiThunks.init_module()
     else:
-        logging.warning("Only linux is supported at the moment.")
+        logging.error("Only linux is supported at the moment.")
         return -1
 
     if not test_oodle():
@@ -2423,7 +2443,7 @@ def __main__() -> int:
             continue
         break
 
-    definitions = load_definitions(args.update_opcodes)
+    definitions = load_definitions(args.update_opcodes, args.json_path)
     if args.region:
         definitions = [x for x in definitions if any(r.lower() in x.Name.lower() for r in args.region)]
 
@@ -2452,7 +2472,10 @@ def __main__() -> int:
                     raise RootRequiredError
 
                 if args.nftables:
-                    h = os.popen(f"nft --handle list ruleset | grep XMLM_{os.getpid()}_{i}_").read().strip().split(" ")[-1]
+                    h = (
+                        os.popen(f"nft --handle list ruleset | grep XMLM_{os.getpid()}_{i}_")
+                        .read().strip().split(" ")[-1]
+                    )
                     remove_cmd = f"nft delete rule ip nat PREROUTING handle {h}"
                 else:
                     remove_cmd = f"iptables -t nat -D PREROUTING {rule} -j REDIRECT --to {port}"
@@ -2468,13 +2491,16 @@ def __main__() -> int:
                 fp.write(f"{remove_cmd}\n")
         os.chmod(cleanup_filepath, 0o777)
 
-        removal_cmds.append("sysctl -w " + os.popen("sysctl net.ipv4.ip_forward")
-                            .read().strip().replace(" ", ""))
-        os.system("sysctl -w net.ipv4.ip_forward=1")
+        if args.write_sysctl:
+            removal_cmds.append("sysctl -w " + os.popen("sysctl net.ipv4.ip_forward")
+                                .read().strip().replace(" ", ""))
+            os.system("sysctl -w net.ipv4.ip_forward=1")
 
-        removal_cmds.append("sysctl -w " + os.popen("sysctl net.ipv4.conf.all.route_localnet")
-                            .read().strip().replace(" ", ""))
-        os.system("sysctl -w net.ipv4.conf.all.route_localnet=1")
+            removal_cmds.append("sysctl -w " + os.popen("sysctl net.ipv4.conf.all.route_localnet")
+                                .read().strip().replace(" ", ""))
+            os.system("sysctl -w net.ipv4.conf.all.route_localnet=1")
+        else:
+            logging.info("Skipping sysctl commands.")
 
         listener.listen(32)
         logging.info(f"Listening on {listener.getsockname()}...")
