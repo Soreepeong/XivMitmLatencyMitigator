@@ -1416,7 +1416,7 @@ class OpcodeDefinition:
 def load_definitions(update_opcodes: bool, json_path: typing.Optional[str]) -> typing.List[OpcodeDefinition]:
     if json_path is not None and json_path.strip() != "":
         with open(json_path) as fp:
-            return [OpcodeDefinition.from_dict(json.load(fp))]
+            return [OpcodeDefinition.from_dict({"Name": json_path, **json.load(fp)})]
 
     definitions_filepath = os.path.join(SCRIPT_DIRECTORY, "definitions.json")
     if os.path.exists(definitions_filepath):
