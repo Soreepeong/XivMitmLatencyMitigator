@@ -1346,6 +1346,7 @@ class XivBundleHeader(ctypes.LittleEndianStructure):
 
 @dataclasses.dataclass
 class OpcodeDefinition:
+    Name: str
     C2S_ActionRequest: int
     C2S_ActionRequestGroundTargeted: int
     S2C_ActionEffect01: int
@@ -2444,7 +2445,7 @@ def __main__() -> int:
         break
 
     definitions = load_definitions(args.update_opcodes, args.json_path)
-    if args.region:
+    if args.region and (args.json_path is None or args.json_path.strip() == ""):
         definitions = [x for x in definitions if any(r.lower() in x.Name.lower() for r in args.region)]
 
     removal_cmds = []
