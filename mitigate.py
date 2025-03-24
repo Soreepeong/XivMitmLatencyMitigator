@@ -1981,7 +1981,7 @@ class Connection:
 
 def download_exe(src_url: str):
     print("Downloading:", src_url)
-    with urllib.request.urlopen(src_url) as resp:
+    with (open(src_url, "rb") if os.path.exists(src_url) else urllib.request.urlopen(src_url)) as resp:
         data = bytearray(resp.read())
     if data[0:2] == b'MZ':
         dosh = ImageDosHeader.from_buffer(data)
@@ -2055,10 +2055,15 @@ def download_exe(src_url: str):
                 elif sqpkhdr.command in {b'HDV', b'HDI', b'HDD', b'HIV', b'HII', b'HID'}:
                     fp.readinto(sqpkhdr2 := ZiPatchSqpackFileResolver())
 
+                else:
+                    print(f"Skipping {hdr.type}:{sqpkhdr.command}")
+
             fp.seek(offset + hdr.size, os.SEEK_SET)
             fp.readinto(ZiPatchChunkFooter())
             if hdr.type == b"EOF_":
                 break
+            elif hdr.type != b"SQPK":
+                print(f"Skipping {hdr.type}")
 
     found_any_file = False
     for target_file_name, target_file_data in target_files.items():
