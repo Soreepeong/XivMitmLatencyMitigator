@@ -1136,32 +1136,28 @@ class XivMessageIpcActorCast(ctypes.LittleEndianStructure):
 
 class XivMessageIpcActionRequest(ctypes.LittleEndianStructure):
     _fields_ = (
-        ("unknown_0x000", ctypes.c_uint8),
-        ("type", ctypes.c_uint8),
-        ("unknown_0x002", ctypes.c_uint16),
         ("action_id", ctypes.c_uint32),
+        ("unknown_0x002", ctypes.c_uint16),
         ("sequence", ctypes.c_uint16),
-        ("unknown_0x00a", ctypes.c_uint16),
-        ("unknown_0x00c", ctypes.c_uint32),
-        ("unknown_0x010", ctypes.c_uint32),
-        ("target_id", ctypes.c_uint32),
-        ("item_source_slot", ctypes.c_uint16),
-        ("item_source_container", ctypes.c_uint16),
-        ("unknown_0x01c", ctypes.c_uint32),
+        ("unknown_0x006", ctypes.c_uint8 * 0x38),
     )
 
     unknown_0x000: typing.Union[int, ctypes.c_uint8]
     type: typing.Union[int, ctypes.c_uint8]
     unknown_0x002: typing.Union[int, ctypes.c_uint16]
-    action_id: typing.Union[int, ctypes.c_uint32]
-    sequence: typing.Union[int, ctypes.c_uint16]
-    unknown_0x00a: typing.Union[int, ctypes.c_uint16]
-    unknown_0x00c: typing.Union[int, ctypes.c_uint32]
-    unknown_0x010: typing.Union[int, ctypes.c_uint32]
-    target_id: typing.Union[int, ctypes.c_uint32]
-    item_source_slot: typing.Union[int, ctypes.c_uint16]
-    item_source_container: typing.Union[int, ctypes.c_uint16]
-    unknown_0x01c: typing.Union[int, ctypes.c_uint32]
+
+
+class XivMessageIpcActionRequestGroundTargeted(ctypes.LittleEndianStructure):
+    _fields_ = (
+        ("action_id", ctypes.c_uint32),
+        ("unknown_0x002", ctypes.c_uint16),
+        ("sequence", ctypes.c_uint16),
+        ("unknown_0x006", ctypes.c_uint8 * 0x30),
+    )
+
+    unknown_0x000: typing.Union[int, ctypes.c_uint8]
+    type: typing.Union[int, ctypes.c_uint8]
+    unknown_0x002: typing.Union[int, ctypes.c_uint16]
 
 
 class XivMessageIpcCustomOriginalWaitTime(ctypes.LittleEndianStructure):
@@ -1401,10 +1397,6 @@ class OpcodeDefinition:
                 kwargs[field.name] = None if data[field.name] is None else field.type(data[field.name])
         return OpcodeDefinition(**kwargs)
 
-    def is_request(self, opcode: int):
-        return (opcode == self.C2S_ActionRequest
-                or opcode == self.C2S_ActionRequestGroundTargeted)
-
     def is_action_effect(self, opcode: int):
         return (opcode == self.S2C_ActionEffect01
                 or opcode == self.S2C_ActionEffect08
@@ -1627,20 +1619,26 @@ class Connection:
                 ipc = XivMessageIpcHeader.from_buffer(message_data)
                 if ipc.type != XivMessageIpcType.UnknownButInterested:
                     continue
-                if self.opcodes.is_request(ipc.subtype):
+
+                if ipc.subtype == self.opcodes.C2S_ActionRequest:
                     request = XivMessageIpcActionRequest.from_buffer(message_data, ctypes.sizeof(ipc))
                     self.pending_actions.append(PendingAction(request.action_id, request.sequence))
+                elif ipc.subtype == self.opcodes.C2S_ActionRequestGroundTargeted:
+                    request = XivMessageIpcActionRequestGroundTargeted.from_buffer(message_data, ctypes.sizeof(ipc))
+                    self.pending_actions.append(PendingAction(request.action_id, request.sequence))
+                else:
+                    continue
 
-                    # If somehow latest action request has been made before last animation lock end time, keep it.
-                    # Otherwise...
-                    if self.pending_actions[-1].request_timestamp > self.last_animation_lock_ends_at:
+                # If somehow latest action request has been made before last animation lock end time, keep it.
+                # Otherwise...
+                if self.pending_actions[-1].request_timestamp > self.last_animation_lock_ends_at:
 
-                        # If there was no action queued to begin with before the current one,
-                        # update the base lock time to now.
-                        if len(self.pending_actions) == 1:
-                            self.last_animation_lock_ends_at = self.pending_actions[-1].request_timestamp
+                    # If there was no action queued to begin with before the current one,
+                    # update the base lock time to now.
+                    if len(self.pending_actions) == 1:
+                        self.last_animation_lock_ends_at = self.pending_actions[-1].request_timestamp
 
-                    logging.info(f"C2S_ActionRequest: actionId={request.action_id:04x} sequence={request.sequence:04x}")
+                logging.info(f"C2S_ActionRequest: actionId={request.action_id:04x} sequence={request.sequence:04x}")
             except Exception as e:
                 logging.exception(f"unknown error {e} occurred in upstream handler; skipping")
         return bundle_header, messages
