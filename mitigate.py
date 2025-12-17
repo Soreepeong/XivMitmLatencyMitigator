@@ -1134,30 +1134,15 @@ class XivMessageIpcActorCast(ctypes.LittleEndianStructure):
     unknown_0x01e: typing.Union[int, ctypes.c_uint16]
 
 
-class XivMessageIpcActionRequest(ctypes.LittleEndianStructure):
+class XivMessageIpcActionRequestCommon(ctypes.LittleEndianStructure):
     _fields_ = (
         ("action_id", ctypes.c_uint32),
         ("unknown_0x002", ctypes.c_uint16),
         ("sequence", ctypes.c_uint16),
-        ("unknown_0x006", ctypes.c_uint8 * 0x38),
     )
 
-    unknown_0x000: typing.Union[int, ctypes.c_uint8]
-    type: typing.Union[int, ctypes.c_uint8]
-    unknown_0x002: typing.Union[int, ctypes.c_uint16]
-
-
-class XivMessageIpcActionRequestGroundTargeted(ctypes.LittleEndianStructure):
-    _fields_ = (
-        ("action_id", ctypes.c_uint32),
-        ("unknown_0x002", ctypes.c_uint16),
-        ("sequence", ctypes.c_uint16),
-        ("unknown_0x006", ctypes.c_uint8 * 0x30),
-    )
-
-    unknown_0x000: typing.Union[int, ctypes.c_uint8]
-    type: typing.Union[int, ctypes.c_uint8]
-    unknown_0x002: typing.Union[int, ctypes.c_uint16]
+    action_id: typing.Union[int, ctypes.c_uint32]
+    sequence: typing.Union[int, ctypes.c_uint16]
 
 
 class XivMessageIpcCustomOriginalWaitTime(ctypes.LittleEndianStructure):
@@ -1620,14 +1605,11 @@ class Connection:
                 if ipc.type != XivMessageIpcType.UnknownButInterested:
                     continue
 
-                if ipc.subtype == self.opcodes.C2S_ActionRequest:
-                    request = XivMessageIpcActionRequest.from_buffer(message_data, ctypes.sizeof(ipc))
-                    self.pending_actions.append(PendingAction(request.action_id, request.sequence))
-                elif ipc.subtype == self.opcodes.C2S_ActionRequestGroundTargeted:
-                    request = XivMessageIpcActionRequestGroundTargeted.from_buffer(message_data, ctypes.sizeof(ipc))
-                    self.pending_actions.append(PendingAction(request.action_id, request.sequence))
-                else:
+                if ipc.subtype not in (self.opcodes.C2S_ActionRequest, self.opcodes.C2S_ActionRequestGroundTargeted):
                     continue
+
+                request = XivMessageIpcActionRequestCommon.from_buffer(message_data, ctypes.sizeof(ipc))
+                self.pending_actions.append(PendingAction(request.action_id, request.sequence))
 
                 # If somehow latest action request has been made before last animation lock end time, keep it.
                 # Otherwise...
