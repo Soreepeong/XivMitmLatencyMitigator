@@ -31,6 +31,7 @@ import zlib
 import configparser
 
 # region Miscellaneous constants and typedefs
+# this script is for containers only (XIVOmega) 
 
 ACTION_ID_AUTO_ATTACK = 0x0007
 ACTION_ID_AUTO_ATTACK_MCH = 0x0008
@@ -46,10 +47,7 @@ This addon is already in gray area. Do NOT decrease this value. You've been warn
 Feel free to increase and see how does it feel like to play on high latency instead, though."""
 
 T = typing.TypeVar("T")
-ArgumentTuple = collections.namedtuple(
-    "ArgumentTuple",
-    ("region", "extra_delay", "measure_ping", "update_opcodes", "write_sysctl", "json_path")
-)
+ArgumentTuple = collections.namedtuple("ArgumentTuple", ("region", "extra_delay", "measure_ping", "update_opcodes"))
 
 #read parms
 
@@ -352,10 +350,7 @@ class ImageOptionalHeader32(ctypes.LittleEndianStructure):
     SizeOfHeapCommit: typing.Union[int, ctypes.c_uint32]
     LoaderFlags: typing.Union[int, ctypes.c_uint32]
     NumberOfRvaAndSizes: typing.Union[int, ctypes.c_uint32]
-    DataDirectory: typing.Union[
-        typing.Sequence[ImageDataDirectory],
-        ImageDataDirectory * IMAGE_NUMBEROF_DIRECTORY_ENTRIES,
-    ]
+    DataDirectory: typing.Union[typing.Sequence[ImageDataDirectory], ImageDataDirectory * IMAGE_NUMBEROF_DIRECTORY_ENTRIES]
 
 
 class ImageOptionalHeader64(ctypes.LittleEndianStructure):
@@ -420,10 +415,7 @@ class ImageOptionalHeader64(ctypes.LittleEndianStructure):
     SizeOfHeapCommit: typing.Union[int, ctypes.c_uint64]
     LoaderFlags: typing.Union[int, ctypes.c_uint32]
     NumberOfRvaAndSizes: typing.Union[int, ctypes.c_uint32]
-    DataDirectory: typing.Union[
-        typing.Sequence[ImageDataDirectory],
-        ImageDataDirectory * IMAGE_NUMBEROF_DIRECTORY_ENTRIES,
-    ]
+    DataDirectory: typing.Union[typing.Sequence[ImageDataDirectory], ImageDataDirectory * IMAGE_NUMBEROF_DIRECTORY_ENTRIES]
 
 
 class ImageNtHeaders32(ctypes.LittleEndianStructure):
@@ -1191,15 +1183,34 @@ class XivMessageIpcActorCast(ctypes.LittleEndianStructure):
     unknown_0x01e: typing.Union[int, ctypes.c_uint16]
 
 
-class XivMessageIpcActionRequestCommon(ctypes.LittleEndianStructure):
+class XivMessageIpcActionRequest(ctypes.LittleEndianStructure):
     _fields_ = (
-        ("action_id", ctypes.c_uint32),
+        ("unknown_0x000", ctypes.c_uint8),
+        ("type", ctypes.c_uint8),
         ("unknown_0x002", ctypes.c_uint16),
+        ("action_id", ctypes.c_uint32),
         ("sequence", ctypes.c_uint16),
+        ("unknown_0x00a", ctypes.c_uint16),
+        ("unknown_0x00c", ctypes.c_uint32),
+        ("unknown_0x010", ctypes.c_uint32),
+        ("target_id", ctypes.c_uint32),
+        ("item_source_slot", ctypes.c_uint16),
+        ("item_source_container", ctypes.c_uint16),
+        ("unknown_0x01c", ctypes.c_uint32),
     )
 
+    unknown_0x000: typing.Union[int, ctypes.c_uint8]
+    type: typing.Union[int, ctypes.c_uint8]
+    unknown_0x002: typing.Union[int, ctypes.c_uint16]
     action_id: typing.Union[int, ctypes.c_uint32]
     sequence: typing.Union[int, ctypes.c_uint16]
+    unknown_0x00a: typing.Union[int, ctypes.c_uint16]
+    unknown_0x00c: typing.Union[int, ctypes.c_uint32]
+    unknown_0x010: typing.Union[int, ctypes.c_uint32]
+    target_id: typing.Union[int, ctypes.c_uint32]
+    item_source_slot: typing.Union[int, ctypes.c_uint16]
+    item_source_container: typing.Union[int, ctypes.c_uint16]
+    unknown_0x01c: typing.Union[int, ctypes.c_uint32]
 
 
 class XivMessageIpcCustomOriginalWaitTime(ctypes.LittleEndianStructure):
@@ -1439,6 +1450,10 @@ class OpcodeDefinition:
                 kwargs[field.name] = None if data[field.name] is None else field.type(data[field.name])
         return OpcodeDefinition(**kwargs)
 
+    def is_request(self, opcode: int):
+        return (opcode == self.C2S_ActionRequest
+                or opcode == self.C2S_ActionRequestGroundTargeted)
+
     def is_action_effect(self, opcode: int):
         return (opcode == self.S2C_ActionEffect01
                 or opcode == self.S2C_ActionEffect08
@@ -1447,11 +1462,7 @@ class OpcodeDefinition:
                 or opcode == self.S2C_ActionEffect32)
 
 
-def load_definitions(update_opcodes: bool, json_path: typing.Optional[str]) -> typing.List[OpcodeDefinition]:
-    if json_path is not None and json_path.strip() != "":
-        with open(json_path) as fp:
-            return [OpcodeDefinition.from_dict({"Name": json_path, **json.load(fp)})]
-
+def load_definitions(update_opcodes: bool):
     definitions_filepath = os.path.join(SCRIPT_DIRECTORY, "definitions.json")
     use_config_opcodes = use_custom_opcodes()
     definitions_raw = []
@@ -1675,23 +1686,20 @@ class Connection:
                 ipc = XivMessageIpcHeader.from_buffer(message_data)
                 if ipc.type != XivMessageIpcType.UnknownButInterested:
                     continue
+                if self.opcodes.is_request(ipc.subtype):
+                    request = XivMessageIpcActionRequest.from_buffer(message_data, ctypes.sizeof(ipc))
+                    self.pending_actions.append(PendingAction(request.action_id, request.sequence))
 
-                if ipc.subtype not in (self.opcodes.C2S_ActionRequest, self.opcodes.C2S_ActionRequestGroundTargeted):
-                    continue
+                    # If somehow latest action request has been made before last animation lock end time, keep it.
+                    # Otherwise...
+                    if self.pending_actions[-1].request_timestamp > self.last_animation_lock_ends_at:
 
-                request = XivMessageIpcActionRequestCommon.from_buffer(message_data, ctypes.sizeof(ipc))
-                self.pending_actions.append(PendingAction(request.action_id, request.sequence))
+                        # If there was no action queued to begin with before the current one,
+                        # update the base lock time to now.
+                        if len(self.pending_actions) == 1:
+                            self.last_animation_lock_ends_at = self.pending_actions[-1].request_timestamp
 
-                # If somehow latest action request has been made before last animation lock end time, keep it.
-                # Otherwise...
-                if self.pending_actions[-1].request_timestamp > self.last_animation_lock_ends_at:
-
-                    # If there was no action queued to begin with before the current one,
-                    # update the base lock time to now.
-                    if len(self.pending_actions) == 1:
-                        self.last_animation_lock_ends_at = self.pending_actions[-1].request_timestamp
-
-                logging.info(f"C2S_ActionRequest: actionId={request.action_id:04x} sequence={request.sequence:04x}")
+                    logging.info(f"C2S_ActionRequest: actionId={request.action_id:04x} sequence={request.sequence:04x}")
             except Exception as e:
                 logging.exception(f"unknown error {e} occurred in upstream handler; skipping")
         return bundle_header, messages
@@ -2045,7 +2053,7 @@ class Connection:
 
 def download_exe(src_url: str):
     print("Downloading:", src_url)
-    with (open(src_url, "rb") if os.path.exists(src_url) else urllib.request.urlopen(src_url)) as resp:
+    with urllib.request.urlopen(src_url) as resp:
         data = bytearray(resp.read())
     if data[0:2] == b'MZ':
         dosh = ImageDosHeader.from_buffer(data)
@@ -2119,15 +2127,10 @@ def download_exe(src_url: str):
                 elif sqpkhdr.command in {b'HDV', b'HDI', b'HDD', b'HIV', b'HII', b'HID'}:
                     fp.readinto(sqpkhdr2 := ZiPatchSqpackFileResolver())
 
-                else:
-                    print(f"Skipping {hdr.type}:{sqpkhdr.command}")
-
             fp.seek(offset + hdr.size, os.SEEK_SET)
             fp.readinto(ZiPatchChunkFooter())
             if hdr.type == b"EOF_":
                 break
-            elif hdr.type != b"SQPK":
-                print(f"Skipping {hdr.type}")
 
     found_any_file = False
     for target_file_name, target_file_data in target_files.items():
@@ -2418,7 +2421,7 @@ def __main__() -> int:
 
     parser = argparse.ArgumentParser("XivMitmLatencyMitigator: https://github.com/Soreepeong/XivMitmLatencyMitigator")
     parser.add_argument("-r", "--region", action="append", dest="region", default=[], choices=("JP", "CN", "KR"),
-                        help="Filters connection by regions. Can be specified multiple times. Does nothing if -j is specified.")
+                        help="Filters connection by regions. Can be specified multiple times.")
     parser.add_argument("-e", "--extra-delay", action="store", dest="extra_delay", default=0.075, type=float,
                         help=EXTRA_DELAY_HELP)
     parser.add_argument("-m", "--measure-ping", action="store_true", dest="measure_ping", default=False,
@@ -2426,16 +2429,12 @@ def __main__() -> int:
                         )
     parser.add_argument("-u", "--update-opcodes", action="store_true", dest="update_opcodes", default=False,
                         help="Download new opcodes again; do not use cached opcodes file.")
-    parser.add_argument("-j", "--json-path", action="store", dest="json_path", default=None,
-                        help="Read opcode definition JSON file from the given path.")
     parser.add_argument("-x", "--exe", action="append", dest="exe_url", default=[],
                         help="Download ffxiv.exe and/or ffxiv_dx11.exe from specified URL (exe or patch file.)")
     parser.add_argument("-n", "--nftables", action="store_true", dest="nftables", default=False,
                         help="Use nft instead of iptables.")
     parser.add_argument("--firehose", action="store", dest="firehose", default=None,
                         help="Open a TCP listening socket that will receive all decoded game networking data transferred. (ex: 0.0.0.0:1234)")
-    parser.add_argument("--no-sysctl", action="store_false", dest="write_sysctl", default=True,
-                        help="Do not change sysctl ip_forward and route_localnet.")
 
     args: typing.Union[ArgumentTuple, argparse.Namespace] = parser.parse_args()
 
@@ -2448,18 +2447,14 @@ def __main__() -> int:
         if url:
             download_exe(url)
 
-    if args.json_path:
-        logging.info(f"Opcode definition JSON file path: {args.json_path}")
-    else:
-        logging.info(f"Region filter: {', '.join(args.region) if args.region else '(None)'}")
+    logging.info(f"Region filter: {', '.join(args.region) if args.region else '(None)'}")
     logging.info(f"Extra delay: {args.extra_delay}s")
     logging.info(f"Use measured socket latency: {'yes' if args.measure_ping else 'no'}")
-    logging.info(f"Write sysctl values: {'yes' if args.write_sysctl else 'no'}")
 
     if sys.platform == 'linux':
         OodleWithBudgetAbiThunks.init_module()
     else:
-        logging.error("Only linux is supported at the moment.")
+        logging.warning("Only linux is supported at the moment.")
         return -1
 
     if not test_oodle():
@@ -2495,8 +2490,8 @@ def __main__() -> int:
             continue
         break
 
-    definitions = load_definitions(args.update_opcodes, args.json_path)
-    if args.region and (args.json_path is None or args.json_path.strip() == ""):
+    definitions = load_definitions(args.update_opcodes)
+    if args.region:
         definitions = [x for x in definitions if any(r.lower() in x.Name.lower() for r in args.region)]
 
     removal_cmds = []
@@ -2524,10 +2519,7 @@ def __main__() -> int:
                     raise RootRequiredError
 
                 if args.nftables:
-                    h = (
-                        os.popen(f"nft --handle list ruleset | grep XMLM_{os.getpid()}_{i}_")
-                        .read().strip().split(" ")[-1]
-                    )
+                    h = os.popen(f"nft --handle list ruleset | grep XMLM_{os.getpid()}_{i}_").read().strip().split(" ")[-1]
                     remove_cmd = f"nft delete rule ip nat PREROUTING handle {h}"
                 else:
                     remove_cmd = f"iptables -t nat -D PREROUTING {rule} -j REDIRECT --to {port}"
@@ -2543,16 +2535,13 @@ def __main__() -> int:
                 fp.write(f"{remove_cmd}\n")
         os.chmod(cleanup_filepath, 0o777)
 
-        if args.write_sysctl:
-            removal_cmds.append("sysctl -w " + os.popen("sysctl net.ipv4.ip_forward")
-                                .read().strip().replace(" ", ""))
-            os.system("sysctl -w net.ipv4.ip_forward=1")
+        #removal_cmds.append("sysctl -w " + os.popen("sysctl net.ipv4.ip_forward")
+        #                    .read().strip().replace(" ", ""))
+        os.system("echo already part of the container - sysctl net.ipv4.ip_forward")
 
-            removal_cmds.append("sysctl -w " + os.popen("sysctl net.ipv4.conf.all.route_localnet")
-                                .read().strip().replace(" ", ""))
-            os.system("sysctl -w net.ipv4.conf.all.route_localnet=1")
-        else:
-            logging.info("Skipping sysctl commands.")
+        #removal_cmds.append("sysctl -w " + os.popen("sysctl net.ipv4.conf.all.route_localnet")
+        #                    .read().strip().replace(" ", ""))
+        os.system("echo already part of the container - sysctl net.ipv4.conf.all.route_localnet")
 
         listener.listen(32)
         logging.info(f"Listening on {listener.getsockname()}...")
