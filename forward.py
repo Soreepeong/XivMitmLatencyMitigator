@@ -1,11 +1,13 @@
 #!/usr/bin/sudo python
 import argparse
 import collections
+import contextlib
 import dataclasses
+import errno
+import ipaddress
 import logging.handlers
 import os
-import random
-import select
+import selectors
 import socket
 import struct
 import sys
@@ -13,103 +15,222 @@ import typing
 
 SO_ORIGINAL_DST = 80
 SCRIPT_DIRECTORY = os.path.dirname(os.path.abspath(__file__))
-
-ArgumentTuple = collections.namedtuple(
-    "ArgumentTuple",
-    ("nftables", "write_sysctl")
-)
+BLOCKING_IO_ERRORS = {socket.EWOULDBLOCK, socket.EAGAIN, errno.EINPROGRESS}
 
 
-class InvalidDataException(ValueError):
-    pass
+@dataclasses.dataclass
+class ArgumentTuple:
+    targets: list[str] = dataclasses.field(default_factory=list)
+    nftables: bool = False
+    write_sysctl: bool = True
 
 
 class RootRequiredError(RuntimeError):
     pass
 
 
-# endregion
+class ConnectionManager:
+    def __init__(self, listener: socket.socket, poller: selectors.BaseSelector, args: ArgumentTuple):
+        self._listener = listener
+        self._poller = poller
+        self._args = args
+        self._connections = set[Connection]()
 
-# region Implementation
+    def error(self, instance, e: Exception):
+        assert isinstance(instance, Connection)
+        if isinstance(e, EOFError):
+            logging.info(f"{instance.log_prefix} ended")
+        elif isinstance(e, OSError):
+            logging.error(f"{instance.log_prefix} broken; errno {e.errno}: {e.strerror}")
+        else:
+            logging.error(f"{instance.log_prefix} broken", exc_info=True)
+        instance.close()
+        self._connections.remove(instance)
 
+    def _handle(self, ev: int):
+        if ev & selectors.EVENT_READ:
+            source = "<?>"
+            try:
+                sock, source = self._listener.accept()
+                connection = Connection(self._args, sock, source, self._poller)
+            except:
+                logging.error(f"Failed to accept from {source}", exc_info=True)
+                return
+            self._connections.add(connection)
 
-@dataclasses.dataclass
-class SocketSet:
-    source: socket.socket
-    target: socket.socket
-    log_prefix: str
-    done: bool = False
-    outgoing: typing.Optional[bytearray] = dataclasses.field(default_factory=bytearray)
+    def __enter__(self):
+        self._poller.register(self._listener, selectors.EVENT_READ, (self, self._handle))
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self._poller.unregister(self._listener)
+        self._listener.close()
+
+        for conn in self._connections:
+            conn.close()
+        self._connections.clear()
 
 
 class Connection:
-    def __init__(self, sock: socket.socket, source: typing.Tuple[str, int], args: ArgumentTuple):
-        self.args = args
+    def __init__(self,
+                 args: ArgumentTuple,
+                 sock: socket.socket,
+                 source: typing.Tuple[str, int],
+                 selector: selectors.BaseSelector):
+        with contextlib.ExitStack() as self._cleanup:
+            def set_closed():
+                self._closed = True
 
-        self.source = source
-        self.downstream = sock
-        self.downstream.setsockopt(socket.SOL_TCP, socket.TCP_NODELAY, 1)
-        self.downstream.setsockopt(socket.SOL_TCP, socket.TCP_QUICKACK, 1)
-        self.downstream.setblocking(False)
+            self._cleanup.callback(set_closed)
 
-        self.screen_prefix = f"[{os.getpid():>6}]"
-        srv_port, srv_ip = struct.unpack("!2xH4s8x", self.downstream.getsockopt(socket.SOL_IP, SO_ORIGINAL_DST, 16))
-        self.destination = (socket.inet_ntoa(srv_ip), srv_port)
+            self._cleanup.push(sock)
+            sock2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self._cleanup.push(sock2)
 
-        self.upstream = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.upstream.setsockopt(socket.SOL_TCP, socket.TCP_NODELAY, 1)
-        self.upstream.setsockopt(socket.SOL_TCP, socket.TCP_QUICKACK, 1)
-        self.upstream.setblocking(False)
+            self._args = args
+            self._closed = False
+            self._source = source
 
-        logging.info(f"New {self.downstream.getsockname()} {self.downstream.getpeername()} {self.destination}")
+            self.log_prefix = f"[{sock.fileno():>6}]"
 
-    def run(self):
-        try:
-            with self.downstream, self.upstream:
-                self.upstream.settimeout(3)
-                self.upstream.connect((str(self.destination[0]), self.destination[1]))
-                self.upstream.settimeout(None)
+            srv_port, srv_ip = struct.unpack("!2xH4s8x", sock.getsockopt(socket.SOL_IP, SO_ORIGINAL_DST, 16))
+            self._destination = (socket.inet_ntoa(srv_ip), srv_port)
+            logging.info(f"{self.log_prefix} New: " + " <-> ".join(
+                f"{x[0]}:{x[1]}" for x in (sock.getpeername(), sock.getsockname(), self._destination)))
 
-                check_targets = (
-                    SocketSet(self.downstream, self.upstream, "D->U"),
-                    SocketSet(self.upstream, self.downstream, "U->D"),
+            self._down = Connection.Endpoint(self, sock, selector, True, False, self._handle_down)
+            self._up = Connection.Endpoint(self, sock2, selector, True, True, self._handle_up)
+
+            try:
+                self._up.sock.connect((str(self._destination[0]), self._destination[1]))
+            except socket.error as e:
+                if e.errno not in BLOCKING_IO_ERRORS:
+                    raise
+
+            self._cleanup = self._cleanup.pop_all()
+
+    @property
+    def closed(self):
+        return self._closed
+
+    def close(self):
+        self._cleanup.close()
+
+    def _handle_down(self, ev: int):
+        if self._closed:
+            return
+
+        self._down.handle(ev, self._up)
+
+    def _handle_up(self, ev: int):
+        if self._closed:
+            return
+
+        self._up.handle(ev, self._down)
+
+    def _handle_up_initial(self, ev: int):
+        if self._closed:
+            return
+
+        if ev & selectors.EVENT_READ:
+            err = self._up.sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+            raise OSError(err, os.strerror(err))
+
+        if ev & selectors.EVENT_WRITE:
+            logging.info(f"{self.log_prefix} Connection established")
+            self._down.modify_selector(True, False)
+            self._up.modify_selector(True, False, self._handle_up)
+
+    class Endpoint:
+        def __init__(self,
+                     owner: "Connection",
+                     sock: socket.socket,
+                     selector: selectors.BaseSelector,
+                     event_in: bool,
+                     event_out: bool,
+                     event_cb: typing.Callable[[int], None]):
+            self._owner = owner
+            self.sock = sock
+            self.bufs = collections.deque[memoryview]()
+            self.shut_wr = False
+            self._poller = selector
+            self._event_in = event_in
+            self._event_out = event_out
+            self._event_cb = event_cb
+
+            sock.setsockopt(socket.SOL_TCP, socket.TCP_NODELAY, 1)
+            sock.setsockopt(socket.SOL_TCP, socket.TCP_QUICKACK, 1)
+            sock.setblocking(False)
+            selector.register(sock, (
+                    0
+                    | (selectors.EVENT_READ if event_in else 0)
+                    | (selectors.EVENT_WRITE if event_out else 0)
+            ), (owner, event_cb))
+            owner._cleanup.callback(selector.unregister, sock)
+
+        def fileno(self):
+            return self.sock.fileno()
+
+        def handle(self, ev: int, target: "Connection.Endpoint"):
+            if ev & selectors.EVENT_READ:
+                try:
+                    for _ in range(4):
+                        data = self.sock.recv(4096)
+                        if not data:
+                            target.sock.shutdown(socket.SHUT_WR)
+                            target.shut_wr = True
+                            if self.shut_wr:
+                                raise EOFError
+                            break
+                        self.bufs.append(memoryview(data))
+                except socket.error as e:
+                    if e.errno not in BLOCKING_IO_ERRORS:
+                        raise
+                self._forward_to(target)
+
+            if ev & selectors.EVENT_WRITE:
+                target._forward_to(self)
+
+        def modify_selector(self,
+                            event_in: bool | None = None,
+                            event_out: bool | None = None,
+                            new_cb: typing.Callable[[int], None] = None):
+            changed = False
+            if event_in is not None and event_in != self._event_in:
+                self._event_in = event_in
+                changed = True
+            if event_out is not None and event_out != self._event_out:
+                self._event_out = event_out
+                changed = True
+            if new_cb is not None and new_cb != self._event_cb:
+                self._event_cb = new_cb
+                changed = True
+
+            if changed:
+                eventmask = (
+                        0
+                        | (selectors.EVENT_READ if self._event_in else 0)
+                        | (selectors.EVENT_WRITE if self._event_out else 0)
                 )
-                while any(not v.done for v in check_targets):
-                    rlist, wlist, _ = select.select(
-                        [v.source for v in check_targets if not v.done],
-                        [v.target for v in check_targets if v.outgoing],
-                        [])
+                self._poller.modify(self.sock, eventmask, (self._owner, self._event_cb))
 
-                    for pair in check_targets:
-                        if pair.source in rlist:
-                            try:
-                                data = pair.source.recv(65536)
-                                if not data:
-                                    pair.done = True
-                                else:
-                                    pair.outgoing.extend(data)
-                            except socket.error as e:
-                                if e.errno not in (socket.EWOULDBLOCK, socket.EAGAIN):
-                                    raise
-                           
-                        if pair.outgoing:
-                            try:
-                                del pair.outgoing[:pair.target.send(pair.outgoing)]
-                            except socket.error as e:
-                                if e.errno not in (socket.EWOULDBLOCK, socket.EAGAIN):
-                                    raise
-                        elif pair.done:
-                            try:
-                                pair.target.shutdown(socket.SHUT_WR)
-                            except OSError:
-                                pass
-            logging.info("Closed")
-            return 0
-        except Exception as e:
-            logging.info(f"Closed, exception occurred: {type(e)} {e}", exc_info=True)
-            return -1
+        def _forward_to(self, target: "Connection.Endpoint"):
+            buffer = self.bufs
+            while buffer:
+                buf = buffer.popleft()
+                try:
+                    while buf:
+                        buf = buf[target.sock.send(buf):]
+                except socket.error as e:
+                    if e.errno != socket.EWOULDBLOCK:
+                        raise
+                    buffer.appendleft(buf)
+                    self.modify_selector(event_in=False)
+                    target.modify_selector(event_out=True)
+                    return
 
-# endregion
+            self.modify_selector(event_in=True)
+            target.modify_selector(event_out=False)
 
 
 def __main__() -> int:
@@ -124,25 +245,22 @@ def __main__() -> int:
                         ])
 
     parser = argparse.ArgumentParser("test")
-    parser.add_argument("-n", "--nftables", action="store_true", dest="nftables", default=False)
-    parser.add_argument("--no-sysctl", action="store_false", dest="write_sysctl", default=True)
+    defaults = ArgumentTuple()
+    parser.add_argument("-t", "--target", action="append", dest="targets", default=defaults.targets)
+    parser.add_argument("-n", "--nftables", action="store_true", dest="nftables", default=defaults.nftables)
+    parser.add_argument("--no-sysctl", action="store_false", dest="write_sysctl", default=defaults.write_sysctl)
 
-    args: typing.Union[ArgumentTuple, argparse.Namespace] = parser.parse_args()
+    args: ArgumentTuple | argparse.Namespace = parser.parse_args()
+
+    if len(args.targets) == 0:
+        logging.error("No targets specified")
+        return -1
 
     logging.info(f"Write sysctl values: {'yes' if args.write_sysctl else 'no'}")
 
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    if hasattr(socket, "TCP_NODELAY"):
-        listener.setsockopt(socket.SOL_TCP, socket.TCP_NODELAY, 1)
-    if hasattr(socket, "TCP_QUICKACK"):
-        listener.setsockopt(socket.SOL_TCP, socket.TCP_QUICKACK, 1)
-    while True:
-        port = random.randint(10000, 65535)
-        try:
-            listener.bind(("0.0.0.0", port))
-        except OSError:
-            continue
-        break
+    listener.bind(("0.0.0.0", 0))
+    port = listener.getsockname()[1]
 
     err = 0
     is_child = False
@@ -150,22 +268,30 @@ def __main__() -> int:
     if os.path.exists(cleanup_filepath):
         os.system(cleanup_filepath)
 
+    fw_setup_cmds = []
+    removal_cmds = []
     try:
-        fw_setup_cmds = []
-        removal_cmds = []
-        for i, iprange in enumerate(["204.2.29.0/24"]):
-            if args.nftables:
-                rule = f"ip nat PREROUTING meta l4proto tcp ip daddr {iprange} dnat 127.0.0.1:{port}"
-                fw_setup_cmds.append(f"nft rule {rule}")
-                removal_cmds.append(f"nft delete rule {rule}")
+        targets = []
+        for target in args.targets:
+            if "/" in target:
+                host, prefix_length = target.split("/")
             else:
-                rule = f"-t nat -p tcp -d {iprange} -j REDIRECT --to {port}"
+                host, prefix_length = target, 32
+
+            targets.extend(ipaddress.IPv4Network(f"{x}/{prefix_length}", False)
+                           for x in socket.gethostbyname_ex(host)[2])
+
+        for target in targets:
+            if args.nftables:
+                rule = f"ip nat PREROUTING meta l4proto tcp ip daddr {target} dnat 127.0.0.1:{port}"
+                fw_setup_cmds.append(f"nft -a -e add rule {rule}")
+            else:
+                rule = f"-t nat -p tcp -d {target} -j REDIRECT --to {port}"
                 fw_setup_cmds.append(f"iptables -I PREROUTING {rule}")
                 removal_cmds.append(f"iptables -D PREROUTING {rule}")
 
         if args.nftables:
-            fw_setup_cmds.append(f"nft rule ip filter INPUT tcp dport {port} accept")
-            removal_cmds.append(f"nft delete rule ip filter INPUT tcp dport {port} accept")
+            fw_setup_cmds.append(f"nft -a -e add rule ip filter INPUT tcp dport {port} accept")
         else:
             fw_setup_cmds.append(f"iptables -I INPUT -t filter -p tcp --dport {port} -j ACCEPT")
             removal_cmds.append(f"iptables -D INPUT -t filter -p tcp --dport {port} -j ACCEPT")
@@ -174,10 +300,19 @@ def __main__() -> int:
             fp.write("#!/bin/sh\n")
             fp.writelines(removal_cmds)
 
-        for add_cmd in fw_setup_cmds:
-            logging.info(f"Running: {add_cmd}")
-            if os.system(add_cmd):
-                raise RootRequiredError
+        if args.nftables:
+            for add_cmd in fw_setup_cmds:
+                logging.info(f"Running: {add_cmd}")
+                res = os.popen(add_cmd)
+                h = res.read().strip().split("\n")[0].split(" ")[-1]
+                if res.close():
+                    raise RootRequiredError
+                removal_cmds.append(f"nft delete rule {' '.join(add_cmd.split(' ')[5:8])} handle {h}")
+        else:
+            for add_cmd in fw_setup_cmds:
+                logging.info(f"Running: {add_cmd}")
+                if os.system(add_cmd):
+                    raise RootRequiredError
 
         os.chmod(cleanup_filepath, 0o777)
 
@@ -196,17 +331,14 @@ def __main__() -> int:
         logging.info(f"Listening on {listener.getsockname()}...")
         logging.info("Press Ctrl+C to quit.")
 
-        while True:
-            sock, source = listener.accept()
-
-            child_pid = os.fork()
-            if child_pid == 0:
-                is_child = True
-                listener.close()
-
-                return Connection(sock, source, args).run()
-
-            sock.close()
+        with selectors.DefaultSelector() as selector, ConnectionManager(listener, selector, args) as manager:
+            while True:
+                for fd, ev in selector.select():
+                    instance, handler = fd.data
+                    try:
+                        handler(ev)
+                    except Exception as e:
+                        manager.error(instance, e)
 
     except RootRequiredError:
         logging.error("This program requires root permissions.\n")
@@ -224,7 +356,8 @@ def __main__() -> int:
                 if exit_code:
                     logging.warning(f"\t=> Failed with exit code {exit_code}")
                     err = -1
-            os.remove(cleanup_filepath)
+            if os.path.exists(cleanup_filepath):
+                os.remove(cleanup_filepath)
             if err:
                 logging.error("One or more error have occurred during cleanup.")
                 err = -1
