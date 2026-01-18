@@ -18,6 +18,16 @@ SCRIPT_DIRECTORY = os.path.dirname(os.path.abspath(__file__))
 BLOCKING_IO_ERRORS = {socket.EWOULDBLOCK, socket.EAGAIN, errno.EINPROGRESS}
 
 
+def is_error_nested(e: Exception, error_type: type[Exception]):
+    if isinstance(e, error_type):
+        return e
+    if isinstance(e, ExceptionGroup):
+        for e2 in e.exceptions:
+            if isinstance(e2, error_type):
+                return e2
+    return None
+
+
 @dataclasses.dataclass
 class ArgumentTuple:
     targets: list[str] = dataclasses.field(default_factory=list)
@@ -38,12 +48,15 @@ class ConnectionManager:
 
     def error(self, instance, e: Exception):
         assert isinstance(instance, Connection)
-        if isinstance(e, EOFError):
+        err: EOFError | None = is_error_nested(e, EOFError)
+        if err:
             logging.info(f"{instance.log_prefix} ended")
-        elif isinstance(e, OSError):
-            logging.error(f"{instance.log_prefix} broken; errno {e.errno}: {e.strerror}")
         else:
-            logging.error(f"{instance.log_prefix} broken", exc_info=True)
+            err: socket.error | None = is_error_nested(e, socket.error)
+            if err:
+                logging.error(f"{instance.log_prefix} broken; errno {err.errno}: {err.strerror}")
+            else:
+                logging.error(f"{instance.log_prefix} broken", exc_info=True)
         instance.close()
         self._connections.remove(instance)
 
@@ -152,11 +165,11 @@ class Connection:
             self._owner = owner
             self.sock = sock
             self.bufs = collections.deque[memoryview]()
-            self.shut_wr = False
             self._poller = selector
             self._event_in = event_in
             self._event_out = event_out
             self._event_cb = event_cb
+            self._read_err = self._write_err = None
 
             sock.setsockopt(socket.SOL_TCP, socket.TCP_NODELAY, 1)
             sock.setsockopt(socket.SOL_TCP, socket.TCP_QUICKACK, 1)
@@ -176,20 +189,26 @@ class Connection:
                 try:
                     for _ in range(4):
                         data = self.sock.recv(4096)
-                        if not data:
-                            target.sock.shutdown(socket.SHUT_WR)
-                            target.shut_wr = True
-                            if self.shut_wr:
-                                raise EOFError
+                        if data:
+                            self.bufs.append(memoryview(data))
+                        else:
+                            self._read_err = EOFError()
                             break
-                        self.bufs.append(memoryview(data))
                 except socket.error as e:
                     if e.errno not in BLOCKING_IO_ERRORS:
-                        raise
+                        self._read_err = e
                 self._forward_to(target)
 
             if ev & selectors.EVENT_WRITE:
+                if not self.bufs:
+                    target.modify_selector(event_out=False)
+                    if self._read_err:
+                        target.sock.shutdown(socket.SHUT_WR)
+
                 target._forward_to(self)
+
+            if self._read_err and target._read_err and (not self.bufs or self._write_err) and (not target.bufs or target._write_err):
+                raise ExceptionGroup("Both socket closed", (self._read_err, target._read_err))
 
         def modify_selector(self,
                             event_in: bool | None = None,
@@ -215,22 +234,21 @@ class Connection:
                 self._poller.modify(self.sock, eventmask, (self._owner, self._event_cb))
 
         def _forward_to(self, target: "Connection.Endpoint"):
-            buffer = self.bufs
-            while buffer:
-                buf = buffer.popleft()
+            while self.bufs:
+                buf = self.bufs.popleft()
                 try:
                     while buf:
                         buf = buf[target.sock.send(buf):]
                 except socket.error as e:
-                    if e.errno != socket.EWOULDBLOCK:
-                        raise
-                    buffer.appendleft(buf)
+                    if e.errno not in BLOCKING_IO_ERRORS:
+                        self._write_err = e
+                        break
+                    self.bufs.appendleft(buf)
                     self.modify_selector(event_in=False)
                     target.modify_selector(event_out=True)
                     return
 
-            self.modify_selector(event_in=True)
-            target.modify_selector(event_out=False)
+            self.modify_selector(event_in=not self._read_err)
 
 
 def __main__() -> int:
