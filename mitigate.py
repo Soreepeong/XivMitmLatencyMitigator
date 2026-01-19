@@ -28,6 +28,7 @@ def __main__() -> int:
     if not os.path.exists(pyz_path):
         with urllib.request.urlopen(PYZ_URL) as src, open(pyz_path + ".tmp", "wb") as dst:
             shutil.copyfileobj(src, dst)
+        os.chmod(pyz_path + ".tmp", 0o755)
         os.rename(pyz_path + ".tmp", pyz_path)
 
     args2 = [pyz_path]
