@@ -388,7 +388,7 @@ class ForwardingConnectionHandler(BaseConnectionHandler):
             self._event_out = event_out
             self._event_cb = event_cb
             self._channel = channel
-            self._is_xiv: bool | None = None
+            self._is_xiv = False if message_toucher is None else None
             self._oodle_r: OodleInstance | None = None
             self._oodle_w: OodleInstance | None = None
             self._message_toucher = message_toucher

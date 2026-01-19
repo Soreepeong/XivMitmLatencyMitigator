@@ -38,7 +38,10 @@ def setup_nftables(targets: list[TARGET_TYPE], listen_addr: str, listen_port: in
         else:
             port_rule = f"tcp dport {{ {",".join(port_rule)} }}"
 
-        rules.append(f"ip nat PREROUTING meta l4proto tcp {addr_rule} {port_rule} dnat {listen_addr}:{listen_port}")
+        if listen_addr == "0.0.0.0":
+            rules.append(f"ip nat PREROUTING meta l4proto tcp {addr_rule} {port_rule} dnat 127.0.0.1:{listen_port}")
+        else:
+            rules.append(f"ip nat PREROUTING meta l4proto tcp {addr_rule} {port_rule} dnat {listen_addr}:{listen_port}")
 
     if listen_addr == "0.0.0.0":
         rules.append(f"ip filter INPUT tcp dport {listen_port} accept")

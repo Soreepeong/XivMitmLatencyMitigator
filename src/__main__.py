@@ -100,7 +100,7 @@ def __main__() -> int:
                         dest="enable_web_statistics", default=defaults.enable_web_statistics,
                         help="Enable web interface for displaying statistics.")
     parser.add_argument("-r", "--region", action="append",
-                        dest="regions", default=defaults.regions, choices=("JP", "CN", "KR"),
+                        dest="regions", default=defaults.regions,
                         help="Filters connections by regions. Does nothing if -j is specified.")
     parser.add_argument("-e", "--extra-delay", action="store",
                         dest="extra_delay", default=defaults.extra_delay, type=float,
@@ -144,7 +144,7 @@ def __main__() -> int:
         return -1
 
     definitions = load_definitions(args.working_directory, args.update_opcodes, args.opcode_json_path)
-    if args.regions and (args.json_path is None or args.json_path.strip() == ""):
+    if args.regions and (args.opcode_json_path is None or args.opcode_json_path.strip() == ""):
         definitions = [x for x in definitions if any(r.lower() in x.Name.lower() for r in args.regions)]
 
     targets = [
