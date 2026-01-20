@@ -131,7 +131,7 @@ class WebRequestHandler:
         yield from self._flush()
 
     def _route_stats(self, request: HTTPRequest, url: urllib.parse.ParseResult, qs):
-        interval = max(0.1, float(qs.get('interval', ["1"])[0]))
+        stream = max(0, float(qs.get('stream', ["0"])[0]))
         keys = [x for x in dir(TcpInfo()) if x.startswith("tcpi_")]
         if "cols" in qs:
             cols = [y for x in qs["cols"] for y in x.split(",")]
@@ -146,7 +146,7 @@ class WebRequestHandler:
         yield from self._write(b"\r\n")
 
         yield from self._writecsv("time", "fd", "peer_ip", "peer_port", *keys)
-        for _ in iter(int, 1) if "stream" in qs else range(1):
+        while True:
             now = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
             for sock in self._cm.sockets:
                 try:
@@ -155,7 +155,10 @@ class WebRequestHandler:
                     continue
                 tcp_info = TcpInfo.from_socket(sock)
                 yield from self._writecsv(now, sock.fileno(), *peer_name, *(getattr(tcp_info, x) for x in keys))
-            yield from self._sleep(interval)
+
+            yield from self._sleep(stream)
+            if stream <= 0:
+                break
 
     def _route_404(self, request: HTTPRequest, url: urllib.parse.ParseResult, qs):
         yield from self._write(b"HTTP/1.1 404 Not Found\r\n")
