@@ -163,7 +163,9 @@ class WebRequestHandler:
     def _route_404(self, request: HTTPRequest, url: urllib.parse.ParseResult, qs):
         yield from self._write(b"HTTP/1.1 404 Not Found\r\n")
         yield from self._write(b"Connection: Close\r\n")
+        yield from self._write(b"Content-Type: text/plain; charset=utf-8\r\n")
         yield from self._write(b"\r\n")
+        yield from self._write(b"Not Found\r\n")
 
 
 class WebRequestConnectionHandler(BaseConnectionHandler):

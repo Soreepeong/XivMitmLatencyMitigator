@@ -66,10 +66,6 @@ def parse_opcode_definitions(definitions: list[OpcodeDefinition]) -> typing.Iter
 
 
 def __main__() -> int:
-    if sys.version_info < (3, 8):
-        print("This script requires at least python 3.8")
-        return -1
-
     logging.basicConfig(level=logging.INFO, force=True,
                         format="%(asctime)s\t%(process)d(main)\t%(levelname)s\t%(message)s",
                         handlers=[
@@ -160,6 +156,7 @@ def __main__() -> int:
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
     listener.bind((listen_address, int(listen_port)))
+    listen_address = ipaddress.IPv4Address(listen_address)
     listen_port = listener.getsockname()[1]
 
     cleanup_filepath = os.path.join(args.working_directory, ".cleanup.sh")
