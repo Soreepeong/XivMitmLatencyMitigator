@@ -15,13 +15,14 @@ from utils.interop.linux import TARGET_TYPE, setup_system_configuration
 from utils.interop.oodle import OodleWithBudgetAbiThunks, test_oodle
 from utils.interop.xivalex import load_definitions, OpcodeDefinition, MitigationConfig
 from utils.interop.zipatch import download_exe
+from utils.misc import format_addr_port
 
 
 @dataclasses.dataclass
 class ArgumentTuple:
     targets: list[str] = dataclasses.field(default_factory=list)
     firewall: str = "none"
-    listen: str = "0.0.0.0:0"
+    listen: list[str] = dataclasses.field(default_factory=list)
     write_sysctl: bool = False
     enable_web_statistics: bool = False
     regions: list[str] = dataclasses.field(default_factory=list)
@@ -49,20 +50,61 @@ def parse_args_targets(targets: list[str]) -> typing.Iterable[TARGET_TYPE]:
         if "/" in target:
             host, prefix_length = target.split("/")
             prefix_length = int(prefix_length)
-            for address in socket.gethostbyname_ex(host)[2]:
-                yield ipaddress.IPv4Network(f"{address}/{prefix_length}", False), ports
+            for family, _type, _proto, _canoname, (address, *_) in socket.getaddrinfo(host, 0):
+                match family:
+                    case socket.AF_INET:
+                        yield ipaddress.IPv4Network(f"{address}/{prefix_length}", False), ports
+                    case socket.AF_INET6:
+                        yield ipaddress.IPv6Network(f"{address}/{prefix_length}", False), ports
         elif re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\s*-\s*[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+", target):
             ip1, ip2 = target.split("-", 1)
-            yield (ipaddress.IPv4Address(ip1), ipaddress.IPv4Address(ip2)), ports
+            ip1 = ipaddress.ip_address(ip1)
+            if isinstance(ip1, ipaddress.IPv4Address):
+                yield (ip1, ipaddress.IPv4Address(ip2)), ports
+            elif isinstance(ip1, ipaddress.IPv6Address):
+                yield (ip1, ipaddress.IPv6Address(ip2)), ports
+            else:
+                raise AssertionError
         else:
-            for address in socket.gethostbyname_ex(target)[2]:
-                yield ipaddress.IPv4Network(address, False), ports
+            for family, _type, _proto, _canoname, (address, *_) in socket.getaddrinfo(target, 0):
+                match family:
+                    case socket.AF_INET:
+                        yield ipaddress.IPv4Network(address, False), ports
+                    case socket.AF_INET6:
+                        yield ipaddress.IPv6Network(address, False), ports
 
 
 def parse_opcode_definitions(definitions: list[OpcodeDefinition]) -> typing.Iterable[TARGET_TYPE]:
     for definition in definitions:
         for iprange in definition.Server_IpRange:
             yield iprange, [x[0] if x[0] == x[1] else x for x in definition.Server_PortRange]
+
+
+def listener_from_address(address: str):
+    address = re.sub(r'\s', '', address)
+    if not address.startswith('['):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        if ':' in address:
+            address, port = address.split(":", 1)
+            sock.bind((address, int(port)))
+        else:
+            sock.bind((address, 0))
+    else:
+        address = address[1:]
+        address, port = address.split(']', 1)
+        if not port:
+            port = 0
+        elif port.startswith(':'):
+            port = int(port[1:], 10)
+        else:
+            raise ValueError("invalid ipv6 with port notation")
+        sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM, socket.IPPROTO_TCP)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        sock.bind((address, port))
+    return sock
 
 
 def __main__() -> int:
@@ -78,9 +120,9 @@ def __main__() -> int:
     parser.add_argument("-t", "--target", action="append",
                         dest="targets", default=defaults.targets,
                         help="Target host names or IPv4 addresses to take over, optionally with prefix length.")
-    parser.add_argument("-l", "--listen", action="store",
+    parser.add_argument("-l", "--listen", action="append",
                         dest="listen", default=defaults.listen,
-                        help="IPv4 address and port to listen to.")
+                        help="IP address and port to listen to.")
     parser.add_argument("-f", "--firewall", action="store",
                         dest="firewall", default=defaults.firewall, choices=["none", "iptables", "nftables"],
                         help="Firewall to use to enable NAT towards this application.")
@@ -154,14 +196,12 @@ def __main__() -> int:
 
     if len(targets) == 0:
         targets.append("0.0.0.0/0")
+        targets.append("::0/0")
 
-    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    listen_address, listen_port, *_ = f"{args.listen}:0".split(":")
-    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-    listener.bind((listen_address, int(listen_port)))
-    listen_address = ipaddress.IPv4Address(listen_address)
-    listen_port = listener.getsockname()[1]
+    if len(args.listen) == 0:
+        args.listen.extend(("0.0.0.0:0", "[::]:0"))
+
+    listeners = [listener_from_address(x) for x in args.listen]
 
     cleanup_filepath = os.path.join(args.working_directory, ".cleanup.sh")
     if os.path.exists(cleanup_filepath):
@@ -171,17 +211,17 @@ def __main__() -> int:
     try:
         with open(cleanup_filepath, "w") as fp:
             fp.write("#!/bin/sh\n")
-            fp.writelines(
-                setup_system_configuration(targets, args.firewall, args.write_sysctl, listen_address, listen_port))
+            fp.writelines(setup_system_configuration(targets, args.firewall, args.write_sysctl, listeners))
 
         os.chmod(cleanup_filepath, 0o777)
 
-        listener.listen()
-        logging.info(f"Listening on {listener.getsockname()}...")
+        for listener in listeners:
+            listener.listen()
+            logging.info(f"Listening on: {format_addr_port(*listener.getsockname())}")
         logging.info("Press Ctrl+C to quit.")
 
         with ConnectionManager(
-                listener,
+                listeners,
                 args.upstream_interface,
                 args.enable_web_statistics,
                 MitigationConfig(

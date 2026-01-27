@@ -21,7 +21,7 @@ class FileBoundSelector:
                 | (selectors.EVENT_READ if self._event_in else 0)
                 | (selectors.EVENT_WRITE if self._event_out else 0)
         )
-        self._selector.register(self._sock, eventmask, self._event_cb)
+        self._selector.register(self._sock, eventmask, (self._event_cb,))
 
     def __enter__(self):
         return self
@@ -50,4 +50,4 @@ class FileBoundSelector:
                     | (selectors.EVENT_READ if self._event_in else 0)
                     | (selectors.EVENT_WRITE if self._event_out else 0)
             )
-            self._selector.modify(self._sock, eventmask, self._event_cb)
+            self._selector.modify(self._sock, eventmask, (self._event_cb,))

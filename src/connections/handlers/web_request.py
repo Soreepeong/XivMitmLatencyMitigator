@@ -125,7 +125,7 @@ class WebRequestHandler:
         request = HTTPRequest(self._data[:header_end])
         url = urllib.parse.urlparse(request.path)
         qs = urllib.parse.parse_qs(url.query)
-        logging.info(f"{self._owner} {request.command} {request.path}")
+        logging.info(f"[{self._owner}] {request.command} {request.path}")
         if url.path in ("/stats", "/stats.csv"):
             yield from self._route_stats(request, url, qs)
         else:
@@ -204,7 +204,7 @@ class WebRequestConnectionHandler(BaseConnectionHandler):
             self._cleanup = self._cleanup.pop_all()
 
     def __str__(self):
-        return f"[{self._conn_id:>4}]"
+        return f"{self._conn_id:>4}"
 
     @property
     def closed(self):
