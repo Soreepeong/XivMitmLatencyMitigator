@@ -24,9 +24,13 @@ class OpcodeDefinition:
     S2C_ActorControl: int
     S2C_ActorControlSelf: int
     Common_UseOodleTcp: bool
-    Server_IpRange: typing.List[
-        typing.Union[ipaddress.IPv4Network, tuple[ipaddress.IPv4Address, ipaddress.IPv4Address]]]
-    Server_PortRange: typing.List[tuple[int, int]]
+    Server_IpRange: list[
+        ipaddress.IPv4Network |
+        ipaddress.IPv6Network |
+        tuple[ipaddress.IPv4Address, ipaddress.IPv4Address] |
+        tuple[ipaddress.IPv6Address, ipaddress.IPv6Address]
+    ]
+    Server_PortRange: list[tuple[int, int]]
 
     @classmethod
     def from_dict(cls, data: dict):
@@ -41,9 +45,9 @@ class OpcodeDefinition:
                     part = [x.strip() for x in partstr.split("-")]
                     try:
                         if len(part) == 1:
-                            iplist.append(ipaddress.IPv4Network(part[0]))
+                            iplist.append(ipaddress.ip_network(part[0], False))
                         elif len(part) == 2:
-                            iplist.append(tuple(sorted(ipaddress.IPv4Address(x) for x in part)))
+                            iplist.append(tuple(sorted(ipaddress.ip_address(x) for x in part)))
                         else:
                             raise ValueError
                     except ValueError:
@@ -66,6 +70,9 @@ class OpcodeDefinition:
             else:
                 kwargs[field.name] = None if data[field.name] is None else field.type(data[field.name])
         return OpcodeDefinition(**kwargs)
+
+    def is_applicable(self, ip: ipaddress.IPv4Address | ipaddress.IPv6Address, port: int):
+        return any(ip in x for x in self.Server_IpRange) and any(x[0] <= port <= x[1] for x in self.Server_PortRange)
 
     def is_action_effect(self, opcode: int):
         return (opcode == self.S2C_ActionEffect01

@@ -72,7 +72,8 @@ def __main__() -> int:
                             logging.StreamHandler(sys.stderr),
                         ])
 
-    parser = argparse.ArgumentParser("XivMitmLatencyMitigator: https://github.com/Soreepeong/XivMitmLatencyMitigator")
+    parser = argparse.ArgumentParser("XivMitmLatencyMitigator",
+                                     description="https://github.com/Soreepeong/XivMitmLatencyMitigator")
     defaults = ArgumentTuple()
     parser.add_argument("-t", "--target", action="append",
                         dest="targets", default=defaults.targets,
@@ -95,8 +96,8 @@ def __main__() -> int:
     parser.add_argument("-w", "--web-statistics", action="store_true",
                         dest="enable_web_statistics", default=defaults.enable_web_statistics,
                         help="Enable web interface for displaying statistics.")
-    parser.add_argument("-r", "--region", action="append",
-                        dest="regions", default=defaults.regions,
+    parser.add_argument("-r", "--region", action="append", type=lambda x: x.lower(),
+                        dest="regions", default=defaults.regions, choices=["jp", "cn", "kr", "tw", "off"],
                         help="Filters connections by regions. Does nothing if -j is specified.")
     parser.add_argument("-e", "--extra-delay", action="store",
                         dest="extra_delay", default=defaults.extra_delay, type=float,
@@ -132,16 +133,19 @@ def __main__() -> int:
         if url:
             download_exe(url)
 
-    try:
-        OodleWithBudgetAbiThunks.init_module(args.working_directory)
-        test_oodle()
-    except Exception as e:
-        logging.error(str(e))
-        return -1
+    if "off" in args.regions:
+        definitions = list[OpcodeDefinition]()
+    else:
+        try:
+            OodleWithBudgetAbiThunks.init_module(args.working_directory)
+            test_oodle()
+        except Exception as e:
+            logging.error(str(e))
+            return -1
 
-    definitions = load_definitions(args.working_directory, args.update_opcodes, args.opcode_json_path)
-    if args.regions and (args.opcode_json_path is None or args.opcode_json_path.strip() == ""):
-        definitions = [x for x in definitions if any(r.lower() in x.Name.lower() for r in args.regions)]
+        definitions = load_definitions(args.working_directory, args.update_opcodes, args.opcode_json_path)
+        if args.regions and (args.opcode_json_path is None or args.opcode_json_path.strip() == ""):
+            definitions = [x for x in definitions if any(r.lower() in x.Name.lower() for r in args.regions)]
 
     targets = [
         *parse_args_targets(args.targets),

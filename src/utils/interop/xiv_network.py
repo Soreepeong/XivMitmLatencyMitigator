@@ -258,3 +258,22 @@ class XivBundleHeader(ctypes.LittleEndianStructure):
     compression: typing.Union[int, ctypes.c_uint8]
     unknown_0x022: typing.Union[int, ctypes.c_uint16]
     decoded_body_length: typing.Union[int, ctypes.c_uint32]
+
+    @classmethod
+    def is_xiv_bundle(cls, buf: memoryview):
+        check_len = min(len(cls.MAGIC_CONSTANT_1), len(buf))
+        if (cls.MAGIC_CONSTANT_1[:check_len] != buf[:check_len] and
+                cls.MAGIC_CONSTANT_2[:check_len] != buf[:check_len]):
+            return False
+        if check_len != len(cls.MAGIC_CONSTANT_1):
+            return None
+
+        header = cls.from_buffer(buf)
+        if header.length > cls.MAX_LENGTH:
+            return False
+        if header.compression not in (0, 1, 2):
+            return False
+        if header.length > len(buf):
+            return None
+
+        return True

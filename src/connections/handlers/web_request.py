@@ -2,6 +2,7 @@ import contextlib
 import datetime
 import http.server
 import io
+import ipaddress
 import logging
 import selectors
 import socket
@@ -9,6 +10,7 @@ import time
 import typing
 import urllib.parse
 
+from utils.file_bound_selector import FileBoundSelector
 from .base import BaseConnectionHandler
 from utils.consts import BLOCKING_IO_ERRORS
 from structs.tcp_info import TcpInfo
@@ -131,7 +133,7 @@ class WebRequestHandler:
         yield from self._flush()
 
     def _route_stats(self, request: HTTPRequest, url: urllib.parse.ParseResult, qs):
-        stream = max(0, float(qs.get('stream', ["0"])[0]))
+        stream = max(0., float(qs.get('stream', ["0"])[0]))
         keys = [x for x in dir(TcpInfo()) if x.startswith("tcpi_")]
         if "cols" in qs:
             cols = [y for x in qs["cols"] for y in x.split(",")]
@@ -173,13 +175,12 @@ class WebRequestConnectionHandler(BaseConnectionHandler):
                  cm: "ConnectionManager",
                  conn_id: int,
                  sock: socket.socket,
-                 addr: tuple[str, int],
+                 addr: tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, int],
                  selector: selectors.BaseSelector):
         self._cm = cm
         self._conn_id = conn_id
         self._sock = sock
         self._addr = addr
-        self._selector = selector
         self._closed = False
         self._wbuf = RingByteBuffer(16384)
         self._event_in = True
@@ -196,12 +197,10 @@ class WebRequestConnectionHandler(BaseConnectionHandler):
             sock.setsockopt(socket.SOL_TCP, socket.TCP_QUICKACK, 1)
             sock.setblocking(False)
 
-            selector.register(sock, selectors.EVENT_READ, (self, self._handle))
-            self._cleanup.callback(selector.unregister, sock)
-
             self._request_handler = WebRequestHandler(self, cm, self._wbuf,
-                                                      lambda: self._modify_selector(event_out=True))
+                                                      lambda: self._selector.modify(event_out=True))
 
+            self._selector = self._cleanup.push(FileBoundSelector(selector, sock, True, False, self._handle))
             self._cleanup = self._cleanup.pop_all()
 
     def __str__(self):
@@ -235,7 +234,7 @@ class WebRequestConnectionHandler(BaseConnectionHandler):
                             self,
                             self._cm,
                             self._wbuf,
-                            lambda: self._modify_selector(event_out=True))
+                            lambda: self._selector.modify(event_out=True))
                     elif not recv and self._request_handler is None:
                         raise EOFError
                     self._request_handler.step(recv)
@@ -251,14 +250,14 @@ class WebRequestConnectionHandler(BaseConnectionHandler):
                             if not buf:
                                 return
 
-                            self._modify_selector(event_out=True)
+                            self._selector.modify(event_out=True)
                             send_len = self._sock.send(buf)
                             self._wbuf.commit_read(send_len)
                     except socket.error as e:
                         if e.errno not in BLOCKING_IO_ERRORS:
                             raise
                 else:
-                    self._modify_selector(event_out=False)
+                    self._selector.modify(event_out=False)
                     if self._wbuf.error:
                         raise self._wbuf.error
                     elif self._request_handler is not None:
@@ -267,20 +266,3 @@ class WebRequestConnectionHandler(BaseConnectionHandler):
             if self._request_handler is not None:
                 self._request_handler.throw(e)
             raise
-
-    def _modify_selector(self, event_in: bool | None = None, event_out: bool | None = None):
-        changed = False
-        if event_in is not None and event_in != self._event_in:
-            self._event_in = event_in
-            changed = True
-        if event_out is not None and event_out != self._event_out:
-            self._event_out = event_out
-            changed = True
-
-        if changed:
-            eventmask = (
-                    0
-                    | (selectors.EVENT_READ if self._event_in else 0)
-                    | (selectors.EVENT_WRITE if self._event_out else 0)
-            )
-            self._selector.modify(self._sock, eventmask, (self, self._handle))
