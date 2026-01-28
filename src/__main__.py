@@ -10,12 +10,13 @@ import sys
 import typing
 
 from connections.manager import ConnectionManager
-from utils.exceptions import RootRequiredError
+from utils.consts import DUMMY_NET_NAME
+from utils.exceptions import SubprocessFailedError
 from utils.interop.linux import TARGET_TYPE, setup_system_configuration
 from utils.interop.oodle import OodleWithBudgetAbiThunks, test_oodle
 from utils.interop.xivalex import load_definitions, OpcodeDefinition, MitigationConfig
 from utils.interop.zipatch import download_exe
-from utils.misc import format_addr_port
+from utils.misc import format_addr_port, dedup_targets, generate_nat64_targets
 
 
 @dataclasses.dataclass
@@ -33,11 +34,27 @@ class ArgumentTuple:
     ffxiv_exe_urls: list[str] = dataclasses.field(default_factory=list)
     upstream_interface: str | None = None
     working_directory: str | None = None
+    dummy_addr4: str = "215.14.52.234"  # random IPv4 address under US DoD address space
+    dummy_addr6: str = "fd83:191b:5ab5:145c:15fe:a835:d640:69fe"  # random local IPv6 address
+    nftables_meta_mark: int = 0xFF14EE03
 
 
 def parse_args_targets(targets: list[str]) -> typing.Iterable[TARGET_TYPE]:
     for target in targets:
-        if ":" in target:
+        target = target.strip()
+        if target.startswith("["):
+            if "]:" in target:
+                target, ports = target[1:].split("]:", 1)
+                ports = [
+                    tuple(int(y.strip()) for y in x.split("-", 2)) if "-" in x else int(x)
+                    for x in ports.split(",")
+                ]
+            elif target.endswith("]"):
+                target = target[1:-1]
+                ports = [None]
+            else:
+                raise ValueError(f"\"{target}\" is not a valid target")
+        elif ":" in target:
             target, ports = target.split(":", 1)
             ports = [
                 tuple(int(y.strip()) for y in x.split("-", 2)) if "-" in x else int(x)
@@ -46,7 +63,6 @@ def parse_args_targets(targets: list[str]) -> typing.Iterable[TARGET_TYPE]:
         else:
             ports = [None]
 
-        target = target.strip()
         if "/" in target:
             host, prefix_length = target.split("/")
             prefix_length = int(prefix_length)
@@ -56,22 +72,27 @@ def parse_args_targets(targets: list[str]) -> typing.Iterable[TARGET_TYPE]:
                         yield ipaddress.IPv4Network(f"{address}/{prefix_length}", False), ports
                     case socket.AF_INET6:
                         yield ipaddress.IPv6Network(f"{address}/{prefix_length}", False), ports
-        elif re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\s*-\s*[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+", target):
-            ip1, ip2 = target.split("-", 1)
-            ip1 = ipaddress.ip_address(ip1)
-            if isinstance(ip1, ipaddress.IPv4Address):
-                yield (ip1, ipaddress.IPv4Address(ip2)), ports
-            elif isinstance(ip1, ipaddress.IPv6Address):
-                yield (ip1, ipaddress.IPv6Address(ip2)), ports
+            continue
+
+        if "-" in target:
+            try:
+                ip1, ip2 = target.split("-", 1)
+                ip1 = ipaddress.ip_address(ip1)
+                if isinstance(ip1, ipaddress.IPv4Address):
+                    yield (ip1, ipaddress.IPv4Address(ip2)), ports
+                elif isinstance(ip1, ipaddress.IPv6Address):
+                    yield (ip1, ipaddress.IPv6Address(ip2)), ports
+            except ValueError:
+                pass
             else:
-                raise AssertionError
-        else:
-            for family, _type, _proto, _canoname, (address, *_) in socket.getaddrinfo(target, 0):
-                match family:
-                    case socket.AF_INET:
-                        yield ipaddress.IPv4Network(address, False), ports
-                    case socket.AF_INET6:
-                        yield ipaddress.IPv6Network(address, False), ports
+                continue
+
+        for family, _type, _proto, _canoname, (address, *_) in socket.getaddrinfo(target, 0):
+            match family:
+                case socket.AF_INET:
+                    yield ipaddress.IPv4Network(address, False), ports
+                case socket.AF_INET6:
+                    yield ipaddress.IPv6Network(address, False), ports
 
 
 def parse_opcode_definitions(definitions: list[OpcodeDefinition]) -> typing.Iterable[TARGET_TYPE]:
@@ -156,6 +177,15 @@ def __main__() -> int:
     parser.add_argument("-x", "--exe", action="append",
                         dest="ffxiv_exe_urls", default=defaults.ffxiv_exe_urls,
                         help="Download ffxiv.exe and/or ffxiv_dx11.exe from specified URL (exe or patch file.)")
+    parser.add_argument("--dummy-addr4", action="store",
+                        dest="dummy_addr4", default=defaults.dummy_addr4,
+                        help="Dummy IPv4 address for redirecting to this application's socket.")
+    parser.add_argument("--dummy-addr6", action="store",
+                        dest="dummy_addr6", default=defaults.dummy_addr6,
+                        help="Dummy IPv6 address for redirecting to this application's socket.")
+    parser.add_argument("--nftables-meta-mark", action="store", type=int,
+                        dest="nftables_meta_mark", default=defaults.nftables_meta_mark,
+                        help="Meta mark to set for packets that should be accepted. Useful if there are other tables utilizing drop policy.")
 
     args = ArgumentTuple(**vars(parser.parse_args()))
 
@@ -195,13 +225,8 @@ def __main__() -> int:
     ]
 
     if len(targets) == 0:
-        targets.append("0.0.0.0/0")
-        targets.append("::0/0")
-
-    if len(args.listen) == 0:
-        args.listen.extend(("0.0.0.0:0", "[::]:0"))
-
-    listeners = [listener_from_address(x) for x in args.listen]
+        targets.append(ipaddress.IPv4Address("0.0.0.0/0"))
+        targets.append(ipaddress.IPv6Address("::0/0"))
 
     cleanup_filepath = os.path.join(args.working_directory, ".cleanup.sh")
     if os.path.exists(cleanup_filepath):
@@ -209,11 +234,31 @@ def __main__() -> int:
         os.remove(cleanup_filepath)
 
     try:
-        with open(cleanup_filepath, "w") as fp:
+        with open(cleanup_filepath, "w", opener=lambda path, flags: os.open(path, flags, 0o755)) as fp:
             fp.write("#!/bin/sh\n")
-            fp.writelines(setup_system_configuration(targets, args.firewall, args.write_sysctl, listeners))
 
-        os.chmod(cleanup_filepath, 0o777)
+            # https://serverfault.com/questions/975558/nftables-ip6-route-to-localhost-ipv6-nat-to-loopback
+            fp.write(f"ip link delete {DUMMY_NET_NAME}\n")
+            for cmd in (
+                    f"ip link add {DUMMY_NET_NAME} type dummy",
+                    f"ip link set {DUMMY_NET_NAME} up",
+                    f"ip addr add {args.dummy_addr4} dev {DUMMY_NET_NAME}",
+                    f"ip addr add {args.dummy_addr6} dev {DUMMY_NET_NAME}",
+            ):
+                SubprocessFailedError.raise_if_nonzero(os.system(cmd))
+
+            listeners = [
+                listener_from_address(f"{args.dummy_addr4}:0"),
+                listener_from_address(f"[{args.dummy_addr6}]:0"),
+                *(listener_from_address(x) for x in args.listen)
+            ]
+
+            if any(x.family == socket.AF_INET6 for x in listeners):
+                targets.extend(generate_nat64_targets(targets))
+            targets = dedup_targets(targets)
+
+            fp.writelines(setup_system_configuration(
+                targets, args.firewall, args.nftables_meta_mark, args.write_sysctl, listeners))
 
         for listener in listeners:
             listener.listen()
@@ -233,9 +278,8 @@ def __main__() -> int:
             manager.serve_forever()
         return 0
 
-    except RootRequiredError:
-        logging.error("This program requires root permissions.\n")
-        return -1
+    except SubprocessFailedError as e:
+        return e.code
 
     except KeyboardInterrupt:
         return 0

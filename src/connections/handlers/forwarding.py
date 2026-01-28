@@ -18,21 +18,18 @@ class EndpointStream:
     def __init__(self,
                  selector: selectors.BaseSelector,
                  name: str,
-                 sock: socket.socket | None,
                  event_in: bool,
                  event_out: bool,
-                 event_cb: typing.Callable[[int], None]):
+                 event_cb: typing.Callable[[int], None],
+                 sock: socket.socket | tuple):
         self.sock = sock
         self._name = name
         self._buf_r = RingByteBuffer(XivBundleHeader.MAX_LENGTH)
 
         self._last_tcpi = TcpInfo()
 
-        if self.sock is None:
-            self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP)
-
         with contextlib.ExitStack() as self._cleanup:
-            self._cleanup.push(self.sock)
+            self.sock = self._cleanup.push(sock if isinstance(sock, socket.socket) else socket.socket(*sock))
 
             self.sock.setsockopt(socket.SOL_TCP, socket.TCP_NODELAY, 1)
             self.sock.setsockopt(socket.SOL_TCP, socket.TCP_QUICKACK, 1)
@@ -131,9 +128,12 @@ class ForwardingConnectionHandler(BaseConnectionHandler):
             self._cleanup.callback(set_closed)
 
             self._down = self._cleanup.push(self._EndpointStreamImpl(
-                selector, f"{self}:down", sock, True, False, self._handle_down))
+                selector, f"{self}:down", True, False, self._handle_down, sock))
             self._up = self._cleanup.push(self._EndpointStreamImpl(
-                selector, f"{self}:up", None, True, True, self._handle_up))
+                selector, f"{self}:up", True, True, self._handle_up, (
+                    socket.AF_INET if isinstance(destination[0], ipaddress.IPv4Address) else socket.AF_INET6,
+                    socket.SOCK_STREAM,
+                    socket.IPPROTO_TCP)))
 
             if upstream_interface is not None:
                 self._up.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE,

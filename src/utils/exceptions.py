@@ -1,5 +1,11 @@
-class RootRequiredError(RuntimeError):
-    pass
+class SubprocessFailedError(RuntimeError):
+    def __init__(self, code: int):
+        self.code = code
+
+    @classmethod
+    def raise_if_nonzero(cls, code: int):
+        if code != 0:
+            raise cls(code)
 
 
 class InvalidDataException(ValueError):
