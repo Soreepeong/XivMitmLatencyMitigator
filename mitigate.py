@@ -1078,6 +1078,8 @@ class XivMessageIpcActorControlSelf(ctypes.LittleEndianStructure):
         ("param_5", ctypes.c_uint32),
         ("param_6", ctypes.c_uint32),
         ("padding_0x01c", ctypes.c_uint32),
+        ("padding_0x020", ctypes.c_uint32),
+        ("padding_0x024", ctypes.c_uint32),
     )
 
     category_int: typing.Union[int, ctypes.c_uint16]
@@ -1089,6 +1091,8 @@ class XivMessageIpcActorControlSelf(ctypes.LittleEndianStructure):
     param_5: typing.Union[int, ctypes.c_uint32]
     param_6: typing.Union[int, ctypes.c_uint32]
     padding_0x01c: typing.Union[int, ctypes.c_uint32]
+    padding_0x020: typing.Union[int, ctypes.c_uint32]
+    padding_0x024: typing.Union[int, ctypes.c_uint32]
 
     @property
     def category(self):
