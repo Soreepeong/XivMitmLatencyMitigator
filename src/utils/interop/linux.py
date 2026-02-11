@@ -2,6 +2,7 @@ import collections
 import ipaddress
 import json
 import os
+import random
 import re
 import shlex
 import socket
@@ -10,6 +11,52 @@ import subprocess
 from utils.consts import SYSCTL_VARS, NFTABLES_TABLE_NAME
 from utils.exceptions import SubprocessFailedError
 from utils.misc import TARGET_TYPE, TARGET_PORT_TYPE, TARGET_ADDRESS_TYPE, is_ipv6
+
+
+def get_all_local_addresses(devname: str = None):
+    with subprocess.Popen(
+            ["ip", "address", "show"] if devname is None else ["ip", "address", "show", "dev", devname],
+            stdout=subprocess.PIPE,
+            text=True) as proc:
+        res, _ = proc.communicate()
+        SubprocessFailedError.raise_if_nonzero(proc.returncode)
+        for x in res.splitlines():
+            if "inet" in x:
+                addr, prefix = x.strip().split(" ", 2)[1].split("/", 1)
+                yield ipaddress.ip_address(addr), prefix
+
+
+def clear_if_addrs(if_name: str):
+    for addr, prefix in get_all_local_addresses(if_name):
+        SubprocessFailedError.raise_if_nonzero(os.system(f"ip address delete {addr}/{prefix} dev {if_name}"))
+
+
+def setup_dummy_adapter(if_name: str, *addrs: ipaddress.IPv4Address | ipaddress.IPv6Address, clear_addrs: bool = True):
+    if clear_addrs:
+        clear_if_addrs(if_name)
+
+    local_addresses = [addr for addr, _ in get_all_local_addresses()]
+    for addr in addrs:
+        if addr.is_unspecified:
+            if isinstance(addr, ipaddress.IPv4Address):
+                lo = int(ipaddress.IPv4Address("169.254.1.0"))
+                hi = int(ipaddress.IPv4Address("169.254.254.255"))
+                while True:
+                    addr = ipaddress.IPv4Address(random.randint(lo, hi))
+                    if addr not in local_addresses:
+                        break
+            elif isinstance(addr, ipaddress.IPv6Address):
+                lo = int(ipaddress.IPv6Address("fe80::"))
+                hi = int(ipaddress.IPv6Address("febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff"))
+                while True:
+                    addr = ipaddress.IPv6Address(random.randint(lo, hi))
+                    if addr not in local_addresses:
+                        break
+            else:
+                raise ValueError
+
+        SubprocessFailedError.raise_if_nonzero(os.system(f"ip address add {addr} dev {if_name} scope link"))
+        yield addr
 
 
 class NftExprGenerators:
@@ -86,7 +133,7 @@ def to_nftables_rules(targets: collections.abc.Iterable[TARGET_TYPE],
                       listen: collections.abc.Iterable[tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, int]],
                       nftables_meta_mark: int):
     listen4 = next((x for x in listen if isinstance(x[0], ipaddress.IPv4Address)), (None, None))
-    listen6 = next((x for x in listen if isinstance(x[0], ipaddress.IPv6Address)), (None, None))
+    listen6 = next((x for x in listen if isinstance(x[0], ipaddress.IPv6Address)), (None, None, None, None))
 
     # see: libnftables-json
 
@@ -109,8 +156,6 @@ def to_nftables_rules(targets: collections.abc.Iterable[TARGET_TYPE],
         laddr, lport = listen6 if ipv6 else listen4
         if laddr is None:
             continue
-        if laddr.is_unspecified:
-            laddr = ipaddress.ip_address("::1" if is_ipv6 else "127.0.0.1")
         yield {
             "family": "inet",
             "table": NFTABLES_TABLE_NAME,
@@ -128,7 +173,7 @@ def to_nftables_rules(targets: collections.abc.Iterable[TARGET_TYPE],
 def setup_nftables(targets: collections.abc.Iterable[TARGET_TYPE],
                    listen: collections.abc.Iterable[tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, int]],
                    nftables_meta_mark: int):
-    with subprocess.Popen(["nft", "-j", "-f", "-"], stdin=subprocess.PIPE) as proc:
+    with subprocess.Popen(["nft", "-j", "-f", "-"], stdin=subprocess.PIPE, text=True) as proc:
         res, _ = proc.communicate(input=json.dumps({"nftables": [
             {"add": {"table": {"family": "inet", "name": NFTABLES_TABLE_NAME}}},
             {"add": {"chain": {"family": "inet", "table": NFTABLES_TABLE_NAME, "name": "INPUT",
@@ -136,7 +181,7 @@ def setup_nftables(targets: collections.abc.Iterable[TARGET_TYPE],
             {"add": {"chain": {"family": "inet", "table": NFTABLES_TABLE_NAME, "name": "PREROUTING",
                                "type": "nat", "hook": "prerouting", "prio": -101, "policy": "accept"}}},
             *({"add": {"rule": x}} for x in to_nftables_rules(targets, listen, nftables_meta_mark))
-        ]}).encode())
+        ]}))
         SubprocessFailedError.raise_if_nonzero(proc.returncode)
 
     yield f"nft -j -f - <<< {shlex.quote(json.dumps({"nftables": [
@@ -179,20 +224,12 @@ def setup_iptables(targets: collections.abc.Iterable[TARGET_TYPE],
             port_rule = f"-m multiport --dports {",".join(port_rule)}"
 
         if use_ipv4 and listen4:
-            if listen4[0].is_unspecified:
-                rules4.append(
-                    f"PREROUTING -t nat -p tcp {addr_rule} {port_rule} -j DNAT --to 127.0.0.1:{listen4[1]}")
-            else:
-                rules4.append(
-                    f"PREROUTING -t nat -p tcp {addr_rule} {port_rule} -j DNAT --to {listen4[0]}:{listen4[1]}")
+            rules4.append(
+                f"PREROUTING -t nat -p tcp {addr_rule} {port_rule} -j DNAT --to {listen4[0]}:{listen4[1]}")
 
         if use_ipv6 and listen6:
-            if listen4[0].is_unspecified:
-                rules6.append(
-                    f"PREROUTING -t nat -p tcp {addr_rule} {port_rule} -j DNAT --to [::1]:{listen6[1]}")
-            else:
-                rules6.append(
-                    f"PREROUTING -t nat -p tcp {addr_rule} {port_rule} -j DNAT --to [{listen6[0]}]:{listen6[1]}")
+            rules6.append(
+                f"PREROUTING -t nat -p tcp {addr_rule} {port_rule} -j DNAT --to [{listen6[0]}]:{listen6[1]}")
 
     for addr, port in listen:
         if isinstance(addr, ipaddress.IPv4Address):
@@ -222,8 +259,8 @@ def get_sysctl(var_name: str):
 
 
 def setup_sysctl():
-    with subprocess.Popen(["sysctl", *SYSCTL_VARS.keys()], stdout=subprocess.PIPE) as proc:
-        res = proc.communicate()[0].decode()
+    with subprocess.Popen(["sysctl", *SYSCTL_VARS.keys()], stdout=subprocess.PIPE, text=True) as proc:
+        res, _ = proc.communicate()
         SubprocessFailedError.raise_if_nonzero(proc.returncode)
         yield " ".join(shlex.quote(x) for x in [
             "sysctl",
@@ -242,7 +279,7 @@ def setup_system_configuration(targets: collections.abc.Iterable[TARGET_TYPE],
                                nftables_meta_mark: int,
                                write_sysctl: bool,
                                sockets: collections.abc.Iterable[socket.socket]):
-    addr_tuples = [(ipaddress.ip_address(x), y) for x, y, *_ in [x.getsockname() for x in sockets]]
+    addr_tuples = [(ipaddress.ip_address(x), port) for x, port, *_ in [x.getsockname() for x in sockets]]
 
     match firewall:
         case "nftables":

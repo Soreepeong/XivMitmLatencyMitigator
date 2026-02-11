@@ -1,6 +1,8 @@
 import collections
 import ipaddress
 import itertools
+import re
+import socket
 import typing
 
 from utils.consts import NAT64_NETWORK
@@ -27,13 +29,18 @@ def clamp(v: T, min_: T, max_: T) -> T:
     return max(min_, min(max_, v))
 
 
-def format_addr_port(addr: ipaddress.IPv4Address | ipaddress.IPv6Address | str, port: int, *_):
+def format_addr_port(addr: ipaddress.IPv4Address | ipaddress.IPv6Address | str, port: int, *rest):
     if isinstance(addr, str):
         addr = ipaddress.ip_address(addr)
     if isinstance(addr, ipaddress.IPv4Address):
         return f"{addr}:{port}"
+    elif isinstance(addr, ipaddress.IPv6Address):
+        if len(rest) >= 2 and rest[1] != 0:
+            return f"[{addr}%{socket.if_indextoname(rest[1])}]:{port}"
+        else:
+            return f"[{addr}]:{port}"
     else:
-        return f"[{addr}]:{port}"
+        raise AssertionError
 
 
 def format_addr_port_tuples(*addrs: tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, int], sep=", "):
@@ -71,3 +78,32 @@ def is_ipv6(addr: TARGET_ADDRESS_TYPE):
     return isinstance(addr, (ipaddress.IPv6Address, ipaddress.IPv6Network)) or (
             isinstance(addr, tuple) and len(addr) == 2 and
             isinstance(addr[0], ipaddress.IPv6Address) and isinstance(addr[1], ipaddress.IPv6Address))
+
+
+def getaddrinfo_for_tcp_with_port(address: str):
+    address = re.sub(r'\s', '', address)
+    if not address.startswith('['):
+        if ':' in address:
+            address, port = address.split(":", 1)
+            port = int(port)
+        else:
+            port = 0
+        return socket.getaddrinfo(str(address), port, socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP)
+    else:
+        address = address[1:]
+        address, port = address.split(']', 1)
+        if not port:
+            port = 0
+        elif port.startswith(':'):
+            port = int(port[1:])
+        else:
+            raise ValueError("invalid ipv6 with port notation")
+        return socket.getaddrinfo(str(address), port, socket.AF_INET6, socket.SOCK_STREAM, socket.IPPROTO_TCP)
+
+
+def listener_from_address(family: int, type: int, proto: int, _canonname: str, sockaddr: tuple):
+    sock = socket.socket(family, type, proto)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+    sock.bind(sockaddr)
+    return sock

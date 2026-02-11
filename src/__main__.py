@@ -4,7 +4,6 @@ import dataclasses
 import ipaddress
 import logging.handlers
 import os
-import re
 import socket
 import sys
 import typing
@@ -12,11 +11,12 @@ import typing
 from connections.manager import ConnectionManager
 from utils.consts import DUMMY_NET_NAME
 from utils.exceptions import SubprocessFailedError
-from utils.interop.linux import TARGET_TYPE, setup_system_configuration
+from utils.interop.linux import TARGET_TYPE, setup_system_configuration, setup_dummy_adapter
 from utils.interop.oodle import OodleWithBudgetAbiThunks, test_oodle
 from utils.interop.xivalex import load_definitions, OpcodeDefinition, MitigationConfig
 from utils.interop.zipatch import download_exe
-from utils.misc import format_addr_port, dedup_targets, generate_nat64_targets
+from utils.misc import format_addr_port, dedup_targets, generate_nat64_targets, listener_from_address, \
+    getaddrinfo_for_tcp_with_port
 
 
 @dataclasses.dataclass
@@ -34,9 +34,10 @@ class ArgumentTuple:
     ffxiv_exe_urls: list[str] = dataclasses.field(default_factory=list)
     upstream_interface: str | None = None
     working_directory: str | None = None
-    dummy_addr4: str = "215.14.52.234"  # random IPv4 address under US DoD address space
-    dummy_addr6: str = "fd83:191b:5ab5:145c:15fe:a835:d640:69fe"  # random local IPv6 address
+    dummy_addr4: str = "0.0.0.0"
+    dummy_addr6: str = "::0"
     nftables_meta_mark: int = 0xFF14EE03
+    nat64: str = "none"
 
 
 def parse_args_targets(targets: list[str]) -> typing.Iterable[TARGET_TYPE]:
@@ -101,31 +102,20 @@ def parse_opcode_definitions(definitions: list[OpcodeDefinition]) -> typing.Iter
             yield iprange, [x[0] if x[0] == x[1] else x for x in definition.Server_PortRange]
 
 
-def listener_from_address(address: str):
-    address = re.sub(r'\s', '', address)
-    if not address.startswith('['):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-        if ':' in address:
-            address, port = address.split(":", 1)
-            sock.bind((address, int(port)))
+def get_listen_sockaddrs(args: ArgumentTuple):
+    sockaddrs = []
+    for x in setup_dummy_adapter(
+            DUMMY_NET_NAME, ipaddress.IPv4Address(args.dummy_addr4), ipaddress.IPv6Address(args.dummy_addr6)):
+        if isinstance(x, ipaddress.IPv4Address):
+            yield from socket.getaddrinfo(str(x), 0, socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP)
+        elif isinstance(x, ipaddress.IPv6Address):
+            yield from socket.getaddrinfo(f"{x}%{DUMMY_NET_NAME}", 0,
+                                          socket.AF_INET6, socket.SOCK_STREAM, socket.IPPROTO_TCP)
         else:
-            sock.bind((address, 0))
-    else:
-        address = address[1:]
-        address, port = address.split(']', 1)
-        if not port:
-            port = 0
-        elif port.startswith(':'):
-            port = int(port[1:], 10)
-        else:
-            raise ValueError("invalid ipv6 with port notation")
-        sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM, socket.IPPROTO_TCP)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-        sock.bind((address, port))
-    return sock
+            raise AssertionError
+    for x in args.listen:
+        yield from getaddrinfo_for_tcp_with_port(x)
+    return sockaddrs
 
 
 def __main__() -> int:
@@ -186,6 +176,9 @@ def __main__() -> int:
     parser.add_argument("--nftables-meta-mark", action="store", type=int,
                         dest="nftables_meta_mark", default=defaults.nftables_meta_mark,
                         help="Meta mark to set for packets that should be accepted. Useful if there are other tables utilizing drop policy.")
+    parser.add_argument("--nat64", action="store",
+                        dest="nat64", default=defaults.nat64, choices=["none", "wrap", "unwrap"],
+                        help="NAT64 preference mode.")
 
     args = ArgumentTuple(**vars(parser.parse_args()))
 
@@ -239,20 +232,10 @@ def __main__() -> int:
 
             # https://serverfault.com/questions/975558/nftables-ip6-route-to-localhost-ipv6-nat-to-loopback
             fp.write(f"ip link delete {DUMMY_NET_NAME}\n")
-            for cmd in (
-                    f"ip link add {DUMMY_NET_NAME} type dummy",
-                    f"ip link set {DUMMY_NET_NAME} up",
-                    f"ip addr add {args.dummy_addr4} dev {DUMMY_NET_NAME}",
-                    f"ip addr add {args.dummy_addr6} dev {DUMMY_NET_NAME}",
-            ):
-                SubprocessFailedError.raise_if_nonzero(os.system(cmd))
+            SubprocessFailedError.raise_if_nonzero(os.system(f"ip link add {DUMMY_NET_NAME} type dummy"))
+            SubprocessFailedError.raise_if_nonzero(os.system(f"ip link set {DUMMY_NET_NAME} up"))
 
-            listeners = [
-                listener_from_address(f"{args.dummy_addr4}:0"),
-                listener_from_address(f"[{args.dummy_addr6}]:0"),
-                *(listener_from_address(x) for x in args.listen)
-            ]
-
+            listeners = list(listener_from_address(*y) for y in get_listen_sockaddrs(args))
             if any(x.family == socket.AF_INET6 for x in listeners):
                 targets.extend(generate_nat64_targets(targets))
             targets = dedup_targets(targets)
@@ -269,6 +252,7 @@ def __main__() -> int:
                 listeners,
                 args.upstream_interface,
                 args.enable_web_statistics,
+                args.nat64,
                 MitigationConfig(
                     args.measure_ping,
                     args.extra_delay,
