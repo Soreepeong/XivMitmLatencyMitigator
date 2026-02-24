@@ -1,11 +1,15 @@
 #!/usr/bin/sudo python
 import argparse
 import dataclasses
+import grp
 import ipaddress
 import logging.handlers
 import os
+import pwd
+import signal
 import socket
 import sys
+import time
 import typing
 
 from connections.manager import ConnectionManager
@@ -38,9 +42,29 @@ class ArgumentTuple:
     dummy_addr6: str = "::0"
     nftables_meta_mark: int = 0xFF14EE03
     nat64: str = "none"
+    dns_lookup_timeout: float = 30
+    serve_as_user: str = "nobody"
+    serve_as_group: str = "nobody"
 
 
-def parse_args_targets(targets: list[str]) -> typing.Iterable[TARGET_TYPE]:
+def create_getaddrinfo_with_timeout(timeout: float):
+    until = time.time() + timeout
+
+    def getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+        while True:
+            try:
+                return socket.getaddrinfo(host, port, family, type, proto, flags)
+            except socket.gaierror as e:
+                if e.errno not in (socket.EAI_AGAIN, socket.EAI_SYSTEM, socket.EAI_MEMORY, socket.EAI_FAIL):
+                    raise
+                if time.time() > until:
+                    raise
+                time.sleep(2)
+
+    return getaddrinfo
+
+
+def parse_args_targets(targets: list[str], getaddrinfo) -> typing.Iterable[TARGET_TYPE]:
     for target in targets:
         target = target.strip()
         if target.startswith("["):
@@ -67,7 +91,7 @@ def parse_args_targets(targets: list[str]) -> typing.Iterable[TARGET_TYPE]:
         if "/" in target:
             host, prefix_length = target.split("/")
             prefix_length = int(prefix_length)
-            for family, _type, _proto, _canoname, (address, *_) in socket.getaddrinfo(host, 0):
+            for family, _type, _proto, _canoname, (address, *_) in getaddrinfo(host, 0):
                 match family:
                     case socket.AF_INET:
                         yield ipaddress.IPv4Network(f"{address}/{prefix_length}", False), ports
@@ -88,7 +112,7 @@ def parse_args_targets(targets: list[str]) -> typing.Iterable[TARGET_TYPE]:
             else:
                 continue
 
-        for family, _type, _proto, _canoname, (address, *_) in socket.getaddrinfo(target, 0):
+        for family, _type, _proto, _canoname, (address, *_) in getaddrinfo(target, 0):
             match family:
                 case socket.AF_INET:
                     yield ipaddress.IPv4Network(address, False), ports
@@ -102,19 +126,18 @@ def parse_opcode_definitions(definitions: list[OpcodeDefinition]) -> typing.Iter
             yield iprange, [x[0] if x[0] == x[1] else x for x in definition.Server_PortRange]
 
 
-def get_listen_sockaddrs(args: ArgumentTuple):
+def get_listen_sockaddrs(args: ArgumentTuple, getaddrinfo):
     sockaddrs = []
     for x in setup_dummy_adapter(
             DUMMY_NET_NAME, ipaddress.IPv4Address(args.dummy_addr4), ipaddress.IPv6Address(args.dummy_addr6)):
         if isinstance(x, ipaddress.IPv4Address):
-            yield from socket.getaddrinfo(str(x), 0, socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP)
+            yield from getaddrinfo(str(x), 0, socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP)
         elif isinstance(x, ipaddress.IPv6Address):
-            yield from socket.getaddrinfo(f"{x}%{DUMMY_NET_NAME}", 0,
-                                          socket.AF_INET6, socket.SOCK_STREAM, socket.IPPROTO_TCP)
+            yield from getaddrinfo(f"{x}%{DUMMY_NET_NAME}", 0, socket.AF_INET6, socket.SOCK_STREAM, socket.IPPROTO_TCP)
         else:
             raise AssertionError
     for x in args.listen:
-        yield from getaddrinfo_for_tcp_with_port(x)
+        yield from getaddrinfo_for_tcp_with_port(x, getaddrinfo)
     return sockaddrs
 
 
@@ -179,6 +202,15 @@ def __main__() -> int:
     parser.add_argument("--nat64", action="store",
                         dest="nat64", default=defaults.nat64, choices=["none", "wrap", "unwrap"],
                         help="NAT64 preference mode.")
+    parser.add_argument("--dns-lookup-timeout", action="store", type=float,
+                        dest="dns_lookup_timeout", default=defaults.dns_lookup_timeout,
+                        help="DNS lookup timeout, if the DNS server was unreachable.")
+    parser.add_argument("--serve-as-user", action="store",
+                        dest="serve_as_user", default=defaults.serve_as_user,
+                        help="setuid to the specified user before starting to serve.")
+    parser.add_argument("--serve-as-group", action="store",
+                        dest="serve_as_group", default=defaults.serve_as_group,
+                        help="setgid to the specified group before starting to serve.")
 
     args = ArgumentTuple(**vars(parser.parse_args()))
 
@@ -201,19 +233,20 @@ def __main__() -> int:
     if "off" in args.regions:
         definitions = list[OpcodeDefinition]()
     else:
-        try:
-            OodleWithBudgetAbiThunks.init_module(args.working_directory)
-            test_oodle()
-        except Exception as e:
-            logging.error(str(e))
-            return -1
-
         definitions = load_definitions(args.working_directory, args.update_opcodes, args.opcode_json_path)
         if args.regions and (args.opcode_json_path is None or args.opcode_json_path.strip() == ""):
             definitions = [x for x in definitions if any(r.lower() in x.Name.lower() for r in args.regions)]
 
+    uid = gid = -1
+    if args.serve_as_user != "":
+        uid = pwd.getpwnam(args.serve_as_user).pw_uid
+    if args.serve_as_group != "":
+        gid = grp.getgrnam(args.serve_as_group).gr_gid
+
+    getaddrinfo = create_getaddrinfo_with_timeout(args.dns_lookup_timeout)
+
     targets = [
-        *parse_args_targets(args.targets),
+        *parse_args_targets(args.targets, getaddrinfo),
         *parse_opcode_definitions(definitions),
     ]
 
@@ -226,6 +259,7 @@ def __main__() -> int:
         os.system(cleanup_filepath)
         os.remove(cleanup_filepath)
 
+    pid = -1
     try:
         with open(cleanup_filepath, "w", opener=lambda path, flags: os.open(path, flags, 0o755)) as fp:
             fp.write("#!/bin/sh\n")
@@ -235,7 +269,7 @@ def __main__() -> int:
             SubprocessFailedError.raise_if_nonzero(os.system(f"ip link add {DUMMY_NET_NAME} type dummy"))
             SubprocessFailedError.raise_if_nonzero(os.system(f"ip link set {DUMMY_NET_NAME} up"))
 
-            listeners = list(listener_from_address(*y) for y in get_listen_sockaddrs(args))
+            listeners = list(listener_from_address(*y) for y in get_listen_sockaddrs(args, getaddrinfo))
             if any(x.family == socket.AF_INET6 for x in listeners):
                 targets.extend(generate_nat64_targets(targets))
             targets = dedup_targets(targets)
@@ -248,18 +282,37 @@ def __main__() -> int:
             logging.info(f"Listening on: {format_addr_port(*listener.getsockname())}")
         logging.info("Press Ctrl+C to quit.")
 
-        with ConnectionManager(
-                listeners,
-                args.upstream_interface,
-                args.enable_web_statistics,
-                args.nat64,
-                MitigationConfig(
-                    args.measure_ping,
-                    args.extra_delay,
-                    definitions,
-                ),
-        ) as manager:
-            manager.serve_forever()
+        pid = os.fork()
+        if pid == 0:
+            if gid != -1:
+                os.setgid(gid)
+            if uid != -1:
+                os.setuid(uid)
+
+            if "off" not in args.regions:
+                try:
+                    OodleWithBudgetAbiThunks.init_module(args.working_directory)
+                    test_oodle()
+                except Exception as e:
+                    logging.error(str(e))
+                    return -1
+
+            with ConnectionManager(
+                    listeners,
+                    args.upstream_interface,
+                    args.enable_web_statistics,
+                    args.nat64,
+                    MitigationConfig(
+                        args.measure_ping,
+                        args.extra_delay,
+                        definitions,
+                    ),
+            ) as manager:
+                manager.serve_forever()
+        else:
+            for listener in listeners:
+                listener.close()
+            os.waitpid(pid, 0)
         return 0
 
     except SubprocessFailedError as e:
@@ -269,11 +322,15 @@ def __main__() -> int:
         return 0
 
     finally:
-        logging.info("Cleaning up...")
-        if os.path.exists(cleanup_filepath):
-            os.system(cleanup_filepath)
-            os.remove(cleanup_filepath)
-        logging.info("Cleanup complete.")
+        if pid != 0:
+            if pid != -1:
+                os.kill(pid, signal.SIGTERM)
+
+            logging.info("Cleaning up...")
+            if os.path.exists(cleanup_filepath):
+                os.system(cleanup_filepath)
+                os.remove(cleanup_filepath)
+            logging.info("Cleanup complete.")
 
 
 if __name__ == "__main__":

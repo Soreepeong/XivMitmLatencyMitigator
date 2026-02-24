@@ -80,7 +80,7 @@ def is_ipv6(addr: TARGET_ADDRESS_TYPE):
             isinstance(addr[0], ipaddress.IPv6Address) and isinstance(addr[1], ipaddress.IPv6Address))
 
 
-def getaddrinfo_for_tcp_with_port(address: str):
+def getaddrinfo_for_tcp_with_port(address: str, getaddrinfo):
     address = re.sub(r'\s', '', address)
     if not address.startswith('['):
         if ':' in address:
@@ -88,7 +88,7 @@ def getaddrinfo_for_tcp_with_port(address: str):
             port = int(port)
         else:
             port = 0
-        return socket.getaddrinfo(str(address), port, socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP)
+        return getaddrinfo(str(address), port, socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP)
     else:
         address = address[1:]
         address, port = address.split(']', 1)
@@ -98,7 +98,7 @@ def getaddrinfo_for_tcp_with_port(address: str):
             port = int(port[1:])
         else:
             raise ValueError("invalid ipv6 with port notation")
-        return socket.getaddrinfo(str(address), port, socket.AF_INET6, socket.SOCK_STREAM, socket.IPPROTO_TCP)
+        return getaddrinfo(str(address), port, socket.AF_INET6, socket.SOCK_STREAM, socket.IPPROTO_TCP)
 
 
 def listener_from_address(family: int, type: int, proto: int, _canonname: str, sockaddr: tuple):
