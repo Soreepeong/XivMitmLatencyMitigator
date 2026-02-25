@@ -5,6 +5,7 @@ import grp
 import ipaddress
 import logging.handlers
 import os
+import pathlib
 import pwd
 import signal
 import socket
@@ -17,8 +18,9 @@ from utils.consts import DUMMY_NET_NAME
 from utils.exceptions import SubprocessFailedError
 from utils.interop.linux import TARGET_TYPE, setup_system_configuration, setup_dummy_adapter
 from utils.interop.oodle import OodleWithBudgetAbiThunks, test_oodle
+from utils.interop.win32 import POINTER_SIZE
 from utils.interop.xivalex import load_definitions, OpcodeDefinition, MitigationConfig
-from utils.interop.zipatch import download_exe
+from utils.interop.zipatch import download_exes
 from utils.misc import format_addr_port, dedup_targets, generate_nat64_targets, listener_from_address, \
     getaddrinfo_for_tcp_with_port
 
@@ -43,8 +45,7 @@ class ArgumentTuple:
     nftables_meta_mark: int = 0xFF14EE03
     nat64: str = "none"
     dns_lookup_timeout: float = 30
-    serve_as_user: str = "nobody"
-    serve_as_group: str = "nobody"
+    serve_as: str = "nobody"
 
 
 def create_getaddrinfo_with_timeout(timeout: float):
@@ -141,6 +142,30 @@ def get_listen_sockaddrs(args: ArgumentTuple, getaddrinfo):
     return sockaddrs
 
 
+def get_definitions(args: ArgumentTuple) -> list[OpcodeDefinition]:
+    if "off" in args.regions:
+        return []
+
+    definitions = load_definitions(args.working_directory, args.update_opcodes, args.opcode_json_path)
+    if args.regions and (args.opcode_json_path is None or args.opcode_json_path.strip() == ""):
+        definitions = [x for x in definitions if any(r.lower() in x.Name.lower() for r in args.regions)]
+    return definitions
+
+
+def get_setuidgid(name: str) -> tuple[int | None, int | None]:
+    if name == "":
+        return None, None
+
+    serve_as = name.split(":")
+    if len(serve_as) == 1:
+        t = pwd.getpwnam(serve_as[0])
+        return t.pw_uid, t.pw_gid
+    elif len(serve_as) == 2:
+        return pwd.getpwnam(serve_as[0]).pw_uid, grp.getgrnam(serve_as[1]).gr_gid
+    else:
+        raise ValueError("must be in the format of username:groupname, if not username only")
+
+
 def __main__() -> int:
     logging.basicConfig(level=logging.INFO, force=True,
                         format="%(asctime)s\t%(process)d(main)\t%(levelname)s\t%(message)s",
@@ -205,12 +230,9 @@ def __main__() -> int:
     parser.add_argument("--dns-lookup-timeout", action="store", type=float,
                         dest="dns_lookup_timeout", default=defaults.dns_lookup_timeout,
                         help="DNS lookup timeout, if the DNS server was unreachable.")
-    parser.add_argument("--serve-as-user", action="store",
-                        dest="serve_as_user", default=defaults.serve_as_user,
-                        help="setuid to the specified user before starting to serve.")
-    parser.add_argument("--serve-as-group", action="store",
-                        dest="serve_as_group", default=defaults.serve_as_group,
-                        help="setgid to the specified group before starting to serve.")
+    parser.add_argument("--serve-as", action="store",
+                        dest="serve_as", default=defaults.serve_as,
+                        help="setuid/gid to the specified user(:group) before starting to serve.")
 
     args = ArgumentTuple(**vars(parser.parse_args()))
 
@@ -225,23 +247,9 @@ def __main__() -> int:
         logging.warning("Extra delay cannot be a negative number.")
         return -1
 
-    for url in args.ffxiv_exe_urls:
-        url = url.strip()
-        if url:
-            download_exe(url)
-
-    if "off" in args.regions:
-        definitions = list[OpcodeDefinition]()
-    else:
-        definitions = load_definitions(args.working_directory, args.update_opcodes, args.opcode_json_path)
-        if args.regions and (args.opcode_json_path is None or args.opcode_json_path.strip() == ""):
-            definitions = [x for x in definitions if any(r.lower() in x.Name.lower() for r in args.regions)]
-
-    uid = gid = -1
-    if args.serve_as_user != "":
-        uid = pwd.getpwnam(args.serve_as_user).pw_uid
-    if args.serve_as_group != "":
-        gid = grp.getgrnam(args.serve_as_group).gr_gid
+    download_exes(*args.ffxiv_exe_urls)
+    definitions = get_definitions(args)
+    uid, gid = get_setuidgid(args.serve_as)
 
     getaddrinfo = create_getaddrinfo_with_timeout(args.dns_lookup_timeout)
 
@@ -283,37 +291,10 @@ def __main__() -> int:
         logging.info("Press Ctrl+C to quit.")
 
         pid = os.fork()
-        if pid == 0:
-            if gid != -1:
-                os.setgid(gid)
-            if uid != -1:
-                os.setuid(uid)
-
-            if "off" not in args.regions:
-                try:
-                    OodleWithBudgetAbiThunks.init_module(args.working_directory)
-                    test_oodle()
-                except Exception as e:
-                    logging.error(str(e))
-                    return -1
-
-            with ConnectionManager(
-                    listeners,
-                    args.upstream_interface,
-                    args.enable_web_statistics,
-                    args.nat64,
-                    MitigationConfig(
-                        args.measure_ping,
-                        args.extra_delay,
-                        definitions,
-                    ),
-            ) as manager:
-                manager.serve_forever()
-        else:
+        if pid != 0:
             for listener in listeners:
                 listener.close()
-            os.waitpid(pid, 0)
-        return 0
+            return os.waitpid(pid, 0)[1]
 
     except SubprocessFailedError as e:
         return e.code
@@ -324,13 +305,68 @@ def __main__() -> int:
     finally:
         if pid != 0:
             if pid != -1:
-                os.kill(pid, signal.SIGTERM)
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
 
             logging.info("Cleaning up...")
             if os.path.exists(cleanup_filepath):
                 os.system(cleanup_filepath)
                 os.remove(cleanup_filepath)
             logging.info("Cleanup complete.")
+
+    logging.basicConfig(level=logging.INFO, force=True,
+                        format="%(asctime)s\t%(process)d(child)\t%(levelname)s\t%(message)s",
+                        handlers=[
+                            logging.StreamHandler(sys.stderr),
+                        ])
+
+    ffxiv_bytes = None
+    if "off" not in args.regions:
+        ffxiv_exe_filepath = os.path.join(args.working_directory, "ffxiv.exe")
+        ffxiv_dx11_exe_filepath = os.path.join(args.working_directory, "ffxiv_dx11.exe")
+        if POINTER_SIZE == 4:
+            if not os.path.exists(ffxiv_exe_filepath):
+                raise RuntimeError("Need ffxiv.exe in the same directory. "
+                                   "Copy one from your local Windows/Mac installation.")
+
+            ffxiv_bytes = pathlib.Path(ffxiv_exe_filepath).read_bytes()
+        elif POINTER_SIZE == 8:
+            if not os.path.exists(ffxiv_dx11_exe_filepath):
+                raise RuntimeError("Need ffxiv_dx11.exe in the same directory. "
+                                   "Copy one from your local Windows/Mac installation.")
+
+            ffxiv_bytes = pathlib.Path(ffxiv_dx11_exe_filepath).read_bytes()
+        else:
+            raise RuntimeError("Platform not supported. Only x86 and x64 systems are supported.")
+
+    if gid is not None:
+        os.setgid(gid)
+    if uid is not None:
+        os.setuid(uid)
+
+    if ffxiv_bytes is not None:
+        try:
+            OodleWithBudgetAbiThunks.init_module(ffxiv_bytes)
+            test_oodle()
+        except Exception as e:
+            logging.error(str(e))
+            return -1
+
+    with ConnectionManager(
+            listeners,
+            args.upstream_interface,
+            args.enable_web_statistics,
+            args.nat64,
+            MitigationConfig(
+                args.measure_ping,
+                args.extra_delay,
+                definitions,
+            ),
+    ) as manager:
+        manager.serve_forever()
+    return 0
 
 
 if __name__ == "__main__":
