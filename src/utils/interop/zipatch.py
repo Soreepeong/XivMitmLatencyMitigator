@@ -173,6 +173,23 @@ class BlockHeader(ctypes.LittleEndianStructure):
         return self.compressed_size != BlockHeader.COMPRESSED_SIZE_NOT_COMPRESSED and self.decompressed_size != 1
 
 
+def download_exes(*src_urls: str):
+    if not src_urls:
+        return
+
+    errors = []
+    for src_url in src_urls:
+        src_url = src_url.strip()
+        if not src_url:
+            return
+        try:
+            download_exe(src_url)
+            return
+        except Exception as e:
+            errors.append(e)
+    raise ExceptionGroup("Failed to find applicable binary from any of the URLs provided", errors)
+
+
 def download_exe(src_url: str):
     print("Downloading:", src_url)
     with (open(src_url, "rb") if os.path.exists(src_url) else urllib.request.urlopen(src_url)) as resp:

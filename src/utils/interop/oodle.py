@@ -1,6 +1,4 @@
 import ctypes
-import os
-import pathlib
 import re
 import sys
 import typing
@@ -233,21 +231,8 @@ class OodleWithBudgetAbiThunks(BaseOodleHelper):
         return OodleInstance(cls._module, use_tcp)
 
     @classmethod
-    def init_module(cls, path: str):
-        ffxiv_exe_filepath = os.path.join(path, "ffxiv.exe")
-        ffxiv_dx11_exe_filepath = os.path.join(path, "ffxiv_dx11.exe")
-        if POINTER_SIZE == 4:
-            if not os.path.exists(ffxiv_exe_filepath):
-                raise RuntimeError("Need ffxiv.exe in the same directory. "
-                                   "Copy one from your local Windows/Mac installation.")
-
-            cls._module = OodleModule(PeImage(pathlib.Path(ffxiv_exe_filepath).read_bytes()))
-        elif POINTER_SIZE == 8:
-            if not os.path.exists(ffxiv_dx11_exe_filepath):
-                raise RuntimeError("Need ffxiv_dx11.exe in the same directory. "
-                                   "Copy one from your local Windows/Mac installation.")
-
-            cls._module = OodleModule(PeImage(pathlib.Path(ffxiv_dx11_exe_filepath).read_bytes()))
+    def init_module(cls, ffxiv_bytes: bytes):
+        cls._module = OodleModule(PeImage(ffxiv_bytes))
 
 
 OodleHelper = OodleWithBudgetAbiThunks

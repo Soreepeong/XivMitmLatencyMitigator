@@ -6,9 +6,9 @@ import selectors
 import socket
 import typing
 
+from connections.file_bound_selector import FileBoundSelector
 from structs.tcp_info import TcpInfo
 from utils.consts import BLOCKING_IO_ERRORS
-from connections.file_bound_selector import FileBoundSelector
 from utils.interop.xiv_network import XivBundleHeader
 from utils.misc import format_addr_port
 from utils.ring_byte_buffer import RingByteBuffer
@@ -17,7 +17,7 @@ from .base import BaseConnectionHandler
 
 class EndpointStream:
     def __init__(self,
-                 owner: object,
+                 owner: BaseConnectionHandler,
                  selector: selectors.BaseSelector,
                  name: str,
                  event_in: bool,

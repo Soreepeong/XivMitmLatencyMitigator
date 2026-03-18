@@ -10,6 +10,7 @@ import typing
 
 from connections.handlers import BaseConnectionHandler, ForwardingConnectionHandler, WebRequestConnectionHandler
 from connections.handlers.forwarding_xiv import ForwardingXivConnectionHandler
+from utils.consts import NAT64_NETWORK
 from utils.consts import SO_ORIGINAL_DST, IP6T_SO_ORIGINAL_DST
 from utils.exceptions import is_error_nested
 from utils.interop.socket import sockaddr_in, sockaddr_in6
@@ -22,7 +23,7 @@ class DirectConnectionRejectedError(RuntimeError):
 
 
 class ConnectionManager:
-    def __init__(self, listeners: list[socket.socket], upstream_interfaces: list[str], enable_web: bool,
+    def __init__(self, listeners: list[socket.socket], upstream_interfaces: list[str], enable_web: bool, nat64: str,
                  xivalex_mitigation_config: MitigationConfig):
         self._listeners = listeners
         self._selector = selectors.DefaultSelector()
@@ -33,6 +34,7 @@ class ConnectionManager:
         self._upstream_interfaces = upstream_interfaces
         self._enable_web = enable_web
         self._xivalex = xivalex_mitigation_config
+        self._nat64 = nat64
 
     @property
     def closed(self):
@@ -103,24 +105,34 @@ class ConnectionManager:
         down_addr = "<?>"
         log_head = f"[{conn_id:>4}] "
         try:
-            sock, down_addr, *_ = listener.accept()
-            down_addr = ipaddress.ip_address(down_addr[0]), down_addr[1]
+            sock, down_addr, *rest = listener.accept()
+            down_addr = ipaddress.ip_address(down_addr[0]), *down_addr[1:]
             local_addr = sock.getsockname()
-            local_addr = ipaddress.ip_address(local_addr[0]), local_addr[1]
+            local_addr = ipaddress.ip_address(local_addr[0]), *local_addr[1:]
             up_addr = local_addr
 
             match sock.family:
                 case socket.AF_INET:
                     original_dst = sockaddr_in.from_buffer_copy(
                         sock.getsockopt(socket.IPPROTO_IP, SO_ORIGINAL_DST, ctypes.sizeof(sockaddr_in)))
-                    up_addr = ipaddress.ip_address(bytes(original_dst.sin_addr)), int(original_dst.sin_port)
+                    up_addr = ipaddress.IPv4Address(bytes(original_dst.sin_addr)), int(original_dst.sin_port)
+
+                    if self._nat64 == "wrap":
+                        up_addr = ipaddress.IPv6Address(int(up_addr[0]) + int(NAT64_NETWORK)), *up_addr[1:]
                 case socket.AF_INET6:
                     try:
                         original_dst = sockaddr_in6.from_buffer_copy(
                             sock.getsockopt(socket.IPPROTO_IPV6, IP6T_SO_ORIGINAL_DST, ctypes.sizeof(sockaddr_in6)))
-                        up_addr = ipaddress.ip_address(bytes(original_dst.sin6_addr)), int(original_dst.sin6_port)
+                        up_addr = (
+                            ipaddress.IPv6Address(bytes(original_dst.sin6_addr)),
+                            int(original_dst.sin6_port),
+                            int(original_dst.sin6_flowinfo),
+                            int(original_dst.sin6_scope_id),
+                        )
+
+                        if up_addr[0] in NAT64_NETWORK and self._nat64 == "unwrap":
+                            up_addr = ipaddress.IPv4Address(int(up_addr[0]) - int(NAT64_NETWORK)), *up_addr[1:]
                     except FileNotFoundError:
-                        print("TODO")  # TODO
                         up_addr = local_addr
                 case _:
                     raise AssertionError

@@ -1,22 +1,28 @@
 #!/usr/bin/sudo python
 import argparse
 import dataclasses
+import grp
 import ipaddress
 import logging.handlers
 import os
-import re
+import pathlib
+import pwd
+import signal
 import socket
 import sys
+import time
 import typing
 
 from connections.manager import ConnectionManager
 from utils.consts import DUMMY_NET_NAME
 from utils.exceptions import SubprocessFailedError
-from utils.interop.linux import TARGET_TYPE, setup_system_configuration
+from utils.interop.linux import TARGET_TYPE, setup_system_configuration, setup_dummy_adapter
 from utils.interop.oodle import OodleWithBudgetAbiThunks, test_oodle
+from utils.interop.win32 import POINTER_SIZE
 from utils.interop.xivalex import load_definitions, OpcodeDefinition, MitigationConfig
-from utils.interop.zipatch import download_exe
-from utils.misc import format_addr_port, dedup_targets, generate_nat64_targets
+from utils.interop.zipatch import download_exes
+from utils.misc import format_addr_port, dedup_targets, generate_nat64_targets, listener_from_address, \
+    getaddrinfo_for_tcp_with_port
 
 
 @dataclasses.dataclass
@@ -34,12 +40,32 @@ class ArgumentTuple:
     ffxiv_exe_urls: list[str] = dataclasses.field(default_factory=list)
     upstream_interfaces: list[str] = dataclasses.field(default_factory=list)
     working_directory: str | None = None
-    dummy_addr4: str = "215.14.52.234"  # random IPv4 address under US DoD address space
-    dummy_addr6: str = "fd83:191b:5ab5:145c:15fe:a835:d640:69fe"  # random local IPv6 address
+    dummy_addr4: str = "0.0.0.0"
+    dummy_addr6: str = "::0"
     nftables_meta_mark: int = 0xFF14EE03
+    nat64: str = "none"
+    dns_lookup_timeout: float = 30
+    serve_as: str = "nobody"
 
 
-def parse_args_targets(targets: list[str]) -> typing.Iterable[TARGET_TYPE]:
+def create_getaddrinfo_with_timeout(timeout: float):
+    until = time.time() + timeout
+
+    def getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+        while True:
+            try:
+                return socket.getaddrinfo(host, port, family, type, proto, flags)
+            except socket.gaierror as e:
+                if e.errno not in (socket.EAI_AGAIN, socket.EAI_SYSTEM, socket.EAI_MEMORY, socket.EAI_FAIL):
+                    raise
+                if time.time() > until:
+                    raise
+                time.sleep(2)
+
+    return getaddrinfo
+
+
+def parse_args_targets(targets: list[str], getaddrinfo) -> typing.Iterable[TARGET_TYPE]:
     for target in targets:
         target = target.strip()
         if target.startswith("["):
@@ -66,7 +92,7 @@ def parse_args_targets(targets: list[str]) -> typing.Iterable[TARGET_TYPE]:
         if "/" in target:
             host, prefix_length = target.split("/")
             prefix_length = int(prefix_length)
-            for family, _type, _proto, _canoname, (address, *_) in socket.getaddrinfo(host, 0):
+            for family, _type, _proto, _canoname, (address, *_) in getaddrinfo(host, 0):
                 match family:
                     case socket.AF_INET:
                         yield ipaddress.IPv4Network(f"{address}/{prefix_length}", False), ports
@@ -87,7 +113,7 @@ def parse_args_targets(targets: list[str]) -> typing.Iterable[TARGET_TYPE]:
             else:
                 continue
 
-        for family, _type, _proto, _canoname, (address, *_) in socket.getaddrinfo(target, 0):
+        for family, _type, _proto, _canoname, (address, *_) in getaddrinfo(target, 0):
             match family:
                 case socket.AF_INET:
                     yield ipaddress.IPv4Network(address, False), ports
@@ -101,31 +127,43 @@ def parse_opcode_definitions(definitions: list[OpcodeDefinition]) -> typing.Iter
             yield iprange, [x[0] if x[0] == x[1] else x for x in definition.Server_PortRange]
 
 
-def listener_from_address(address: str):
-    address = re.sub(r'\s', '', address)
-    if not address.startswith('['):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-        if ':' in address:
-            address, port = address.split(":", 1)
-            sock.bind((address, int(port)))
+def get_listen_sockaddrs(args: ArgumentTuple, getaddrinfo):
+    sockaddrs = []
+    for x in setup_dummy_adapter(
+            DUMMY_NET_NAME, ipaddress.IPv4Address(args.dummy_addr4), ipaddress.IPv6Address(args.dummy_addr6)):
+        if isinstance(x, ipaddress.IPv4Address):
+            yield from getaddrinfo(str(x), 0, socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP)
+        elif isinstance(x, ipaddress.IPv6Address):
+            yield from getaddrinfo(f"{x}%{DUMMY_NET_NAME}", 0, socket.AF_INET6, socket.SOCK_STREAM, socket.IPPROTO_TCP)
         else:
-            sock.bind((address, 0))
+            raise AssertionError
+    for x in args.listen:
+        yield from getaddrinfo_for_tcp_with_port(x, getaddrinfo)
+    return sockaddrs
+
+
+def get_definitions(args: ArgumentTuple) -> list[OpcodeDefinition]:
+    if "off" in args.regions:
+        return []
+
+    definitions = load_definitions(args.working_directory, args.update_opcodes, args.opcode_json_path)
+    if args.regions and (args.opcode_json_path is None or args.opcode_json_path.strip() == ""):
+        definitions = [x for x in definitions if any(r.lower() in x.Name.lower() for r in args.regions)]
+    return definitions
+
+
+def get_setuidgid(name: str) -> tuple[int | None, int | None]:
+    if name == "":
+        return None, None
+
+    serve_as = name.split(":")
+    if len(serve_as) == 1:
+        t = pwd.getpwnam(serve_as[0])
+        return t.pw_uid, t.pw_gid
+    elif len(serve_as) == 2:
+        return pwd.getpwnam(serve_as[0]).pw_uid, grp.getgrnam(serve_as[1]).gr_gid
     else:
-        address = address[1:]
-        address, port = address.split(']', 1)
-        if not port:
-            port = 0
-        elif port.startswith(':'):
-            port = int(port[1:], 10)
-        else:
-            raise ValueError("invalid ipv6 with port notation")
-        sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM, socket.IPPROTO_TCP)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-        sock.bind((address, port))
-    return sock
+        raise ValueError("must be in the format of username:groupname, if not username only")
 
 
 def __main__() -> int:
@@ -186,6 +224,15 @@ def __main__() -> int:
     parser.add_argument("--nftables-meta-mark", action="store", type=int,
                         dest="nftables_meta_mark", default=defaults.nftables_meta_mark,
                         help="Meta mark to set for packets that should be accepted. Useful if there are other tables utilizing drop policy.")
+    parser.add_argument("--nat64", action="store",
+                        dest="nat64", default=defaults.nat64, choices=["none", "wrap", "unwrap"],
+                        help="NAT64 preference mode.")
+    parser.add_argument("--dns-lookup-timeout", action="store", type=float,
+                        dest="dns_lookup_timeout", default=defaults.dns_lookup_timeout,
+                        help="DNS lookup timeout, if the DNS server was unreachable.")
+    parser.add_argument("--serve-as", action="store",
+                        dest="serve_as", default=defaults.serve_as,
+                        help="setuid/gid to the specified user(:group) before starting to serve.")
 
     args = ArgumentTuple(**vars(parser.parse_args()))
 
@@ -200,27 +247,14 @@ def __main__() -> int:
         logging.warning("Extra delay cannot be a negative number.")
         return -1
 
-    for url in args.ffxiv_exe_urls:
-        url = url.strip()
-        if url:
-            download_exe(url)
+    download_exes(*args.ffxiv_exe_urls)
+    definitions = get_definitions(args)
+    uid, gid = get_setuidgid(args.serve_as)
 
-    if "off" in args.regions:
-        definitions = list[OpcodeDefinition]()
-    else:
-        try:
-            OodleWithBudgetAbiThunks.init_module(args.working_directory)
-            test_oodle()
-        except Exception as e:
-            logging.error(str(e))
-            return -1
-
-        definitions = load_definitions(args.working_directory, args.update_opcodes, args.opcode_json_path)
-        if args.regions and (args.opcode_json_path is None or args.opcode_json_path.strip() == ""):
-            definitions = [x for x in definitions if any(r.lower() in x.Name.lower() for r in args.regions)]
+    getaddrinfo = create_getaddrinfo_with_timeout(args.dns_lookup_timeout)
 
     targets = [
-        *parse_args_targets(args.targets),
+        *parse_args_targets(args.targets, getaddrinfo),
         *parse_opcode_definitions(definitions),
     ]
 
@@ -233,26 +267,17 @@ def __main__() -> int:
         os.system(cleanup_filepath)
         os.remove(cleanup_filepath)
 
+    pid = -1
     try:
         with open(cleanup_filepath, "w", opener=lambda path, flags: os.open(path, flags, 0o755)) as fp:
             fp.write("#!/bin/sh\n")
 
             # https://serverfault.com/questions/975558/nftables-ip6-route-to-localhost-ipv6-nat-to-loopback
             fp.write(f"ip link delete {DUMMY_NET_NAME}\n")
-            for cmd in (
-                    f"ip link add {DUMMY_NET_NAME} type dummy",
-                    f"ip link set {DUMMY_NET_NAME} up",
-                    f"ip addr add {args.dummy_addr4} dev {DUMMY_NET_NAME}",
-                    f"ip addr add {args.dummy_addr6} dev {DUMMY_NET_NAME}",
-            ):
-                SubprocessFailedError.raise_if_nonzero(os.system(cmd))
+            SubprocessFailedError.raise_if_nonzero(os.system(f"ip link add {DUMMY_NET_NAME} type dummy"))
+            SubprocessFailedError.raise_if_nonzero(os.system(f"ip link set {DUMMY_NET_NAME} up"))
 
-            listeners = [
-                listener_from_address(f"{args.dummy_addr4}:0"),
-                listener_from_address(f"[{args.dummy_addr6}]:0"),
-                *(listener_from_address(x) for x in args.listen)
-            ]
-
+            listeners = list(listener_from_address(*y) for y in get_listen_sockaddrs(args, getaddrinfo))
             if any(x.family == socket.AF_INET6 for x in listeners):
                 targets.extend(generate_nat64_targets(targets))
             targets = dedup_targets(targets)
@@ -265,18 +290,11 @@ def __main__() -> int:
             logging.info(f"Listening on: {format_addr_port(*listener.getsockname())}")
         logging.info("Press Ctrl+C to quit.")
 
-        with ConnectionManager(
-                listeners,
-                args.upstream_interfaces,
-                args.enable_web_statistics,
-                MitigationConfig(
-                    args.measure_ping,
-                    args.extra_delay,
-                    definitions,
-                ),
-        ) as manager:
-            manager.serve_forever()
-        return 0
+        pid = os.fork()
+        if pid != 0:
+            for listener in listeners:
+                listener.close()
+            return os.waitpid(pid, 0)[1]
 
     except SubprocessFailedError as e:
         return e.code
@@ -285,11 +303,70 @@ def __main__() -> int:
         return 0
 
     finally:
-        logging.info("Cleaning up...")
-        if os.path.exists(cleanup_filepath):
-            os.system(cleanup_filepath)
-            os.remove(cleanup_filepath)
-        logging.info("Cleanup complete.")
+        if pid != 0:
+            if pid != -1:
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+
+            logging.info("Cleaning up...")
+            if os.path.exists(cleanup_filepath):
+                os.system(cleanup_filepath)
+                os.remove(cleanup_filepath)
+            logging.info("Cleanup complete.")
+
+    logging.basicConfig(level=logging.INFO, force=True,
+                        format="%(asctime)s\t%(process)d(child)\t%(levelname)s\t%(message)s",
+                        handlers=[
+                            logging.StreamHandler(sys.stderr),
+                        ])
+
+    ffxiv_bytes = None
+    if "off" not in args.regions:
+        ffxiv_exe_filepath = os.path.join(args.working_directory, "ffxiv.exe")
+        ffxiv_dx11_exe_filepath = os.path.join(args.working_directory, "ffxiv_dx11.exe")
+        if POINTER_SIZE == 4:
+            if not os.path.exists(ffxiv_exe_filepath):
+                raise RuntimeError("Need ffxiv.exe in the same directory. "
+                                   "Copy one from your local Windows/Mac installation.")
+
+            ffxiv_bytes = pathlib.Path(ffxiv_exe_filepath).read_bytes()
+        elif POINTER_SIZE == 8:
+            if not os.path.exists(ffxiv_dx11_exe_filepath):
+                raise RuntimeError("Need ffxiv_dx11.exe in the same directory. "
+                                   "Copy one from your local Windows/Mac installation.")
+
+            ffxiv_bytes = pathlib.Path(ffxiv_dx11_exe_filepath).read_bytes()
+        else:
+            raise RuntimeError("Platform not supported. Only x86 and x64 systems are supported.")
+
+    if gid is not None:
+        os.setgid(gid)
+    if uid is not None:
+        os.setuid(uid)
+
+    if ffxiv_bytes is not None:
+        try:
+            OodleWithBudgetAbiThunks.init_module(ffxiv_bytes)
+            test_oodle()
+        except Exception as e:
+            logging.error(str(e))
+            return -1
+
+    with ConnectionManager(
+            listeners,
+            args.upstream_interfaces,
+            args.enable_web_statistics,
+            args.nat64,
+            MitigationConfig(
+                args.measure_ping,
+                args.extra_delay,
+                definitions,
+            ),
+    ) as manager:
+        manager.serve_forever()
+    return 0
 
 
 if __name__ == "__main__":

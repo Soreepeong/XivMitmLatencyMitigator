@@ -10,9 +10,9 @@ import time
 import typing
 import urllib.parse
 
+from connections.file_bound_selector import FileBoundSelector
 from structs.tcp_info import TcpInfo
 from utils.consts import BLOCKING_IO_ERRORS
-from connections.file_bound_selector import FileBoundSelector
 from utils.ring_byte_buffer import RingByteBuffer
 from .base import BaseConnectionHandler
 
