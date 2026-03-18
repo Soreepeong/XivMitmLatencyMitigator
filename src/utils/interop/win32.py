@@ -298,6 +298,7 @@ def allocate_executable_memory(length: int):
 def free_executable_memory(ptr: ctypes.c_void_p):
     crt_free(ptr.value)
 
+
 crt_malloc.argtypes = (ctypes.c_size_t,)
 crt_malloc.restype = ctypes.c_size_t
 crt_free.argtypes = (ctypes.c_size_t,)

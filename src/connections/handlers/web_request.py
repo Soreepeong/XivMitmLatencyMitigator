@@ -10,11 +10,11 @@ import time
 import typing
 import urllib.parse
 
-from utils.file_bound_selector import FileBoundSelector
-from .base import BaseConnectionHandler
-from utils.consts import BLOCKING_IO_ERRORS
 from structs.tcp_info import TcpInfo
+from utils.consts import BLOCKING_IO_ERRORS
+from connections.file_bound_selector import FileBoundSelector
 from utils.ring_byte_buffer import RingByteBuffer
+from .base import BaseConnectionHandler
 
 if typing.TYPE_CHECKING:
     from connections.manager import ConnectionManager
@@ -200,7 +200,7 @@ class WebRequestConnectionHandler(BaseConnectionHandler):
             self._request_handler = WebRequestHandler(self, cm, self._wbuf,
                                                       lambda: self._selector.modify(event_out=True))
 
-            self._selector = self._cleanup.push(FileBoundSelector(selector, sock, True, False, self._handle))
+            self._selector = self._cleanup.push(FileBoundSelector(self, selector, sock, True, False, self._handle))
             self._cleanup = self._cleanup.pop_all()
 
     def __str__(self):

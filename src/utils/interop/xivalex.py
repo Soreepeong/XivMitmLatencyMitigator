@@ -4,7 +4,6 @@ import json
 import logging
 import os
 import time
-import typing
 import urllib.request
 
 from utils.consts import OPCODE_DEFINITION_LIST_URL

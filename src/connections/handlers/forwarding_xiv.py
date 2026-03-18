@@ -151,12 +151,9 @@ class ForwardingXivConnectionHandler(ForwardingConnectionHandler, endpoint_strea
                  conn_id: int,
                  sock: socket.socket,
                  destination: tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, int],
-                 upstream_interface: str | None,
+                 upstream_interfaces: list[str],
                  xivalex: MitigationConfig):
-        super().__init__(selector, conn_id, sock, destination, upstream_interface)
         self._xivalex = xivalex
-        self._down._message_toucher = self._touch_from_downstream
-        self._up._message_toucher = self._touch_from_upstream
 
         self.pending_actions = collections.deque[PendingAction]()
 
@@ -167,6 +164,12 @@ class ForwardingXivConnectionHandler(ForwardingConnectionHandler, endpoint_strea
         self.latency_upstream = NumericStatisticsTracker(10)
         self.latency_downstream = NumericStatisticsTracker(10)
         self.latency_exaggeration = NumericStatisticsTracker(10, 30.)
+
+        super().__init__(selector, conn_id, sock, destination, upstream_interfaces)
+
+    def _on_complete_init(self):
+        self._down._message_toucher = self._touch_from_downstream
+        self._up._message_toucher = self._touch_from_upstream
 
     def _touch_from_downstream(self, messages: list[tuple[XivMessageHeader, bytearray]]):
         for message_header, message_data in messages:

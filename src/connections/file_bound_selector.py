@@ -1,15 +1,19 @@
 import selectors
-import typing
 import socket
+import typing
+
+from connections.handlers import BaseConnectionHandler
 
 
 class FileBoundSelector:
     def __init__(self,
+                 owner: BaseConnectionHandler,
                  selector: selectors.BaseSelector,
                  sock: socket.socket,
                  event_in: bool,
                  event_out: bool,
                  event_cb: typing.Callable[[int], None]):
+        self._owner = owner
         self._selector = selector
         self._sock = sock
         self._event_in = event_in
@@ -21,7 +25,7 @@ class FileBoundSelector:
                 | (selectors.EVENT_READ if self._event_in else 0)
                 | (selectors.EVENT_WRITE if self._event_out else 0)
         )
-        self._selector.register(self._sock, eventmask, (self._event_cb,))
+        self._selector.register(self._sock, eventmask, (self._owner, self._event_cb))
 
     def __enter__(self):
         return self
@@ -50,4 +54,4 @@ class FileBoundSelector:
                     | (selectors.EVENT_READ if self._event_in else 0)
                     | (selectors.EVENT_WRITE if self._event_out else 0)
             )
-            self._selector.modify(self._sock, eventmask, (self._event_cb,))
+            self._selector.modify(self._sock, eventmask, (self._owner, self._event_cb))

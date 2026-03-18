@@ -32,7 +32,7 @@ class ArgumentTuple:
     update_opcodes: bool = False
     opcode_json_path: str | None = None
     ffxiv_exe_urls: list[str] = dataclasses.field(default_factory=list)
-    upstream_interface: str | None = None
+    upstream_interfaces: list[str] = dataclasses.field(default_factory=list)
     working_directory: str | None = None
     dummy_addr4: str = "215.14.52.234"  # random IPv4 address under US DoD address space
     dummy_addr6: str = "fd83:191b:5ab5:145c:15fe:a835:d640:69fe"  # random local IPv6 address
@@ -147,9 +147,9 @@ def __main__() -> int:
     parser.add_argument("-f", "--firewall", action="store",
                         dest="firewall", default=defaults.firewall, choices=["none", "iptables", "nftables"],
                         help="Firewall to use to enable NAT towards this application.")
-    parser.add_argument("-i", "--interface", action="store",
-                        dest="upstream_interface", default=defaults.upstream_interface,
-                        help="Specify which interface to use for upstream connections.")
+    parser.add_argument("-i", "--interface", action="append",
+                        dest="upstream_interfaces", default=defaults.upstream_interfaces,
+                        help="Specify which interface to use for upstream connections. May be specified multiple times.")
     parser.add_argument("-d", "--directory", action="store",
                         dest="working_directory", default=defaults.working_directory,
                         help="Directory to look for and store supporting files.")
@@ -267,7 +267,7 @@ def __main__() -> int:
 
         with ConnectionManager(
                 listeners,
-                args.upstream_interface,
+                args.upstream_interfaces,
                 args.enable_web_statistics,
                 MitigationConfig(
                     args.measure_ping,

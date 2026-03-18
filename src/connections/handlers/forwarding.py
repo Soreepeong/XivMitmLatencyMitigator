@@ -6,16 +6,18 @@ import selectors
 import socket
 import typing
 
-from utils.interop.xiv_network import XivBundleHeader
-from utils.file_bound_selector import FileBoundSelector
-from .base import BaseConnectionHandler
-from utils.consts import BLOCKING_IO_ERRORS
 from structs.tcp_info import TcpInfo
+from utils.consts import BLOCKING_IO_ERRORS
+from connections.file_bound_selector import FileBoundSelector
+from utils.interop.xiv_network import XivBundleHeader
+from utils.misc import format_addr_port
 from utils.ring_byte_buffer import RingByteBuffer
+from .base import BaseConnectionHandler
 
 
 class EndpointStream:
     def __init__(self,
+                 owner: object,
                  selector: selectors.BaseSelector,
                  name: str,
                  event_in: bool,
@@ -34,7 +36,8 @@ class EndpointStream:
             self.sock.setsockopt(socket.SOL_TCP, socket.TCP_NODELAY, 1)
             self.sock.setsockopt(socket.SOL_TCP, socket.TCP_QUICKACK, 1)
             self.sock.setblocking(False)
-            self.selector = self._cleanup.push(FileBoundSelector(selector, self.sock, event_in, event_out, event_cb))
+            self.selector = self._cleanup.push(
+                FileBoundSelector(owner, selector, self.sock, event_in, event_out, event_cb))
             self._cleanup = self._cleanup.pop_all()
 
     def __str__(self):
@@ -116,44 +119,103 @@ class ForwardingConnectionHandler(BaseConnectionHandler):
                  conn_id: int,
                  sock: socket.socket,
                  destination: tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, int],
-                 upstream_interface: str | None):
-        selector.owner = self
+                 upstream_interfaces: list[str]):
         self._conn_id = conn_id
         self._closed = False
+        self._selector = selector
+        self._destination = destination
+        self._sock_down = sock
+        self._pending_up_socks: list[socket.socket] = []
 
-        with contextlib.ExitStack() as self._cleanup:
-            def set_closed():
-                self._closed = True
+        af = socket.AF_INET if isinstance(destination[0], ipaddress.IPv4Address) else socket.AF_INET6
 
-            self._cleanup.callback(set_closed)
+        with contextlib.ExitStack() as cleanup:
+            cleanup.callback(lambda: setattr(self, '_closed', True))
+            cleanup.push(sock)
+            cleanup.callback(self._close_pending_up)
 
-            self._down = self._cleanup.push(self._EndpointStreamImpl(
-                selector, f"{self}:down", True, False, self._handle_down, sock))
-            self._up = self._cleanup.push(self._EndpointStreamImpl(
-                selector, f"{self}:up", True, True, self._handle_up, (
-                    socket.AF_INET if isinstance(destination[0], ipaddress.IPv4Address) else socket.AF_INET6,
-                    socket.SOCK_STREAM,
-                    socket.IPPROTO_TCP)))
+            for iface in (upstream_interfaces or [None]):
+                sock2 = socket.socket(af, socket.SOCK_STREAM, socket.IPPROTO_TCP)
+                sock2.setsockopt(socket.SOL_TCP, socket.TCP_NODELAY, 1)
+                sock2.setsockopt(socket.SOL_TCP, socket.TCP_QUICKACK, 1)
+                if iface is not None:
+                    sock2.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, f"{iface}\0".encode("utf-8"))
+                sock2.setblocking(False)
+                try:
+                    sock2.connect((str(destination[0]), destination[1]))
+                except socket.error as e:
+                    if e.errno not in BLOCKING_IO_ERRORS:
+                        sock2.close()
+                        continue
+                self._pending_up_socks.append(sock2)
+                selector.register(
+                    sock2,
+                    selectors.EVENT_READ | selectors.EVENT_WRITE,
+                    (self, lambda ev, s=sock2: self._handle_up_candidate(s, ev)),
+                )
 
-            if upstream_interface is not None:
-                self._up.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE,
-                                         f"{upstream_interface}\0".encode("utf-8"))
+            if not self._pending_up_socks:
+                raise OSError("Could not initiate any upstream connection")
 
+            self._cleanup = cleanup.pop_all()
+
+    def _close_pending_up(self):
+        for sock2 in self._pending_up_socks:
             try:
-                self._up.sock.connect((str(destination[0]), destination[1]))
-            except socket.error as e:
-                if e.errno not in BLOCKING_IO_ERRORS:
-                    raise
+                self._selector.unregister(sock2)
+            except:
+                pass
+            sock2.close()
+        self._pending_up_socks.clear()
 
-            self._cleanup = self._cleanup.pop_all()
+    def _handle_up_candidate(self, sock2: socket.socket, ev: int):
+        if self._closed:
+            return
+
+        err = sock2.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+        if err:
+            self._selector.unregister(sock2)
+            self._pending_up_socks.remove(sock2)
+            sock2.close()
+            if not self._pending_up_socks:
+                raise OSError(err, os.strerror(err))
+            return
+
+        if not (ev & selectors.EVENT_WRITE):
+            return
+
+        iface = sock2.getsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, 16).rstrip(b'\x00').decode() or "(default)"
+        sockname = format_addr_port(*sock2.getsockname())
+        logging.info(f"[{self}] Connected via {iface} from {sockname}")
+        self._selector.unregister(sock2)
+        self._pending_up_socks.remove(sock2)
+        self._close_pending_up()
+        self._complete_init(sock2)
+
+    def _complete_init(self, sock2: socket.socket):
+        self._cleanup.push(sock2)
+
+        self._down = self._cleanup.push(self._EndpointStreamImpl(
+            self, self._selector, f"{self}:down", True, False, self._handle_down, self._sock_down))
+        self._up = self._cleanup.push(self._EndpointStreamImpl(
+            self, self._selector, f"{self}:up", True, False, self._handle_up, sock2))
+
+        self._on_complete_init()
+
+    def _on_complete_init(self):
+        pass
 
     def __str__(self):
         return f"{self._conn_id:>4}"
 
     @property
     def sockets(self):
-        yield self._down.sock
-        yield self._up.sock
+        if hasattr(self, '_down'):
+            yield self._down.sock
+            yield self._up.sock
+        else:
+            yield self._sock_down
+            yield from self._pending_up_socks
 
     @property
     def closed(self):
@@ -163,8 +225,9 @@ class ForwardingConnectionHandler(BaseConnectionHandler):
         self._cleanup.close()
 
     def update_statistics(self):
-        self._up.update_statistics()
-        self._down.update_statistics()
+        if hasattr(self, '_down'):
+            self._up.update_statistics()
+            self._down.update_statistics()
 
     def _handle_down(self, ev: int):
         if self._closed:
@@ -177,16 +240,3 @@ class ForwardingConnectionHandler(BaseConnectionHandler):
             return
 
         self._up.handle(ev, self._down)
-
-    def _handle_up_initial(self, ev: int):
-        if self._closed:
-            return
-
-        if ev & selectors.EVENT_READ:
-            err = self._up.sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
-            raise OSError(err, os.strerror(err))
-
-        if ev & selectors.EVENT_WRITE:
-            logging.info(f"[{self}] Connection established")
-            self._down.selector.modify(True, False)
-            self._up.selector.modify(True, False, self._handle_up)

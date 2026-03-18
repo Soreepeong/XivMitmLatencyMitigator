@@ -10,8 +10,8 @@ import typing
 
 from connections.handlers import BaseConnectionHandler, ForwardingConnectionHandler, WebRequestConnectionHandler
 from connections.handlers.forwarding_xiv import ForwardingXivConnectionHandler
-from utils.exceptions import is_error_nested
 from utils.consts import SO_ORIGINAL_DST, IP6T_SO_ORIGINAL_DST
+from utils.exceptions import is_error_nested
 from utils.interop.socket import sockaddr_in, sockaddr_in6
 from utils.interop.xivalex import MitigationConfig
 from utils.misc import format_addr_port_tuples
@@ -22,16 +22,15 @@ class DirectConnectionRejectedError(RuntimeError):
 
 
 class ConnectionManager:
-    def __init__(self, listeners: list[socket.socket], upstream_interface: str, enable_web: bool,
+    def __init__(self, listeners: list[socket.socket], upstream_interfaces: list[str], enable_web: bool,
                  xivalex_mitigation_config: MitigationConfig):
         self._listeners = listeners
         self._selector = selectors.DefaultSelector()
         self._connections = set[BaseConnectionHandler]()
-        self._fds = dict[object, BaseConnectionHandler | ConnectionManager]()
         self._conn_id_counter = 0
         self._timers = list[ConnectionManager._TimerEntry]()
         self._closed = True
-        self._upstream_interface = upstream_interface
+        self._upstream_interfaces = upstream_interfaces
         self._enable_web = enable_web
         self._xivalex = xivalex_mitigation_config
 
@@ -63,14 +62,13 @@ class ConnectionManager:
                 timeout = None
 
             for fd, ev in self._selector.select(timeout):
-                conn = self._fds.get(fd.fileobj, None)
-                if conn is None or conn.closed:
+                owner, cb, *args = fd.data
+                if owner.closed:
                     continue
                 try:
-                    cb, *args = fd.data
                     cb(*args, ev)
                 except BaseException as e:
-                    self._error(conn, e)
+                    self._error(owner, e)
 
     def wait_until(self, when: float, owner: BaseConnectionHandler, callback: typing.Callable[[], None]):
         heapq.heappush(self._timers, ConnectionManager._TimerEntry(when, owner, callback))
@@ -80,8 +78,7 @@ class ConnectionManager:
             if isinstance(c, ForwardingConnectionHandler):
                 c.update_statistics()
 
-    def _error(self, instance, e: BaseException):
-        assert isinstance(instance, BaseConnectionHandler)
+    def _error(self, instance: BaseConnectionHandler, e: BaseException):
         err: EOFError | StopIteration | None = is_error_nested(e, EOFError, StopIteration)
         if err:
             logging.info(f"[{instance}] ended")
@@ -91,8 +88,6 @@ class ConnectionManager:
                 logging.error(f"[{instance}] broken; errno {err.errno}: {err.strerror}")
             else:
                 logging.error(f"[{instance}] broken", exc_info=True)
-        for sock in instance.sockets:
-            del self._fds[sock]
         instance.close()
         self._connections.remove(instance)
 
@@ -134,11 +129,11 @@ class ConnectionManager:
                 logging.info(log_head + format_addr_port_tuples(down_addr, local_addr, up_addr, sep=" > "))
                 if definitions := [f for f in self._xivalex.definitions if f.is_applicable(*up_addr)]:
                     conn = ForwardingXivConnectionHandler(
-                        self._selector, conn_id, sock, up_addr, self._upstream_interface,
+                        self._selector, conn_id, sock, up_addr, self._upstream_interfaces,
                         MitigationConfig(self._xivalex.measure_ping, self._xivalex.extra_delay, definitions))
                 else:
                     conn = ForwardingConnectionHandler(
-                        self._selector, conn_id, sock, up_addr, self._upstream_interface)
+                        self._selector, conn_id, sock, up_addr, self._upstream_interfaces)
             elif self._enable_web:
                 logging.info(log_head + format_addr_port_tuples(down_addr, up_addr, sep=" > "))
                 conn = WebRequestConnectionHandler(self, conn_id, sock, down_addr, self._selector)
@@ -147,8 +142,6 @@ class ConnectionManager:
                 raise DirectConnectionRejectedError
 
             self._connections.add(conn)
-            for sock in conn.sockets:
-                self._fds[sock] = conn
         except DirectConnectionRejectedError:
             pass
         except Exception as e:
@@ -159,8 +152,7 @@ class ConnectionManager:
 
     def __enter__(self):
         for sock in self._listeners:
-            self._selector.register(sock, selectors.EVENT_READ, (self._handle, sock))
-            self._fds[sock] = self
+            self._selector.register(sock, selectors.EVENT_READ, (self, self._handle, sock))
         self._closed = False
         return self
 
@@ -168,7 +160,6 @@ class ConnectionManager:
         self._closed = True
         for sock in self._listeners:
             self._selector.unregister(sock)
-            del self._fds[sock]
             sock.close()
         self._listeners.clear()
 
