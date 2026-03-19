@@ -9,6 +9,7 @@ import typing
 from connections.file_bound_selector import FileBoundSelector
 from structs.tcp_info import TcpInfo
 from utils.consts import BLOCKING_IO_ERRORS
+from utils.exceptions import close_ignore_errors
 from utils.interop.xiv_network import XivBundleHeader
 from utils.misc import format_addr_port
 from utils.ring_byte_buffer import RingByteBuffer
@@ -126,6 +127,7 @@ class ForwardingConnectionHandler(BaseConnectionHandler):
         self._destination = destination
         self._sock_down = sock
         self._pending_up_socks: list[socket.socket] = []
+        self._pending_up_connect_errors: dict[str, Exception] = {}
 
         af = socket.AF_INET if isinstance(destination[0], ipaddress.IPv4Address) else socket.AF_INET6
 
@@ -146,6 +148,7 @@ class ForwardingConnectionHandler(BaseConnectionHandler):
                 except socket.error as e:
                     if e.errno not in BLOCKING_IO_ERRORS:
                         sock2.close()
+                        self._pending_up_connect_errors[iface] = e
                         continue
                 self._pending_up_socks.append(sock2)
                 selector.register(
@@ -155,42 +158,42 @@ class ForwardingConnectionHandler(BaseConnectionHandler):
                 )
 
             if not self._pending_up_socks:
-                raise OSError("Could not initiate any upstream connection")
+                raise ExceptionGroup("Could not initiate any upstream connection",
+                                     list(self._pending_up_connect_errors.values()))
 
             self._cleanup = cleanup.pop_all()
 
     def _close_pending_up(self):
         for sock2 in self._pending_up_socks:
-            try:
-                self._selector.unregister(sock2)
-            except:
-                pass
-            sock2.close()
+            self._selector.unregister(sock2)
+            close_ignore_errors(sock2)
         self._pending_up_socks.clear()
+        self._pending_up_connect_errors.clear()
 
     def _handle_up_candidate(self, sock2: socket.socket, ev: int):
-        if self._closed:
+        if self._closed or sock2 not in self._pending_up_socks:
             return
+
+        iface = sock2.getsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, 16).rstrip(b'\x00').decode() or "(default)"
 
         err = sock2.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
         if err:
             self._selector.unregister(sock2)
             self._pending_up_socks.remove(sock2)
-            sock2.close()
+            close_ignore_errors(sock2)
+            self._pending_up_connect_errors[iface] = OSError(err, os.strerror(err))
             if not self._pending_up_socks:
-                raise OSError(err, os.strerror(err))
+                raise ExceptionGroup("Could not establish any upstream connection",
+                                     list(self._pending_up_connect_errors.values()))
             return
 
-        if not (ev & selectors.EVENT_WRITE):
-            return
-
-        iface = sock2.getsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, 16).rstrip(b'\x00').decode() or "(default)"
-        sockname = format_addr_port(*sock2.getsockname())
-        logging.info(f"[{self}] Connected via {iface} from {sockname}")
-        self._selector.unregister(sock2)
-        self._pending_up_socks.remove(sock2)
-        self._close_pending_up()
-        self._complete_init(sock2)
+        if ev & selectors.EVENT_WRITE:
+            sockname = format_addr_port(*sock2.getsockname())
+            logging.info(f"[{self}] Connected via {iface} from {sockname}")
+            self._selector.unregister(sock2)
+            self._pending_up_socks.remove(sock2)
+            self._close_pending_up()
+            self._complete_init(sock2)
 
     def _complete_init(self, sock2: socket.socket):
         self._cleanup.push(sock2)

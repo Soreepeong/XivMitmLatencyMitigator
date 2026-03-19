@@ -1,3 +1,6 @@
+import typing
+
+
 class SubprocessFailedError(RuntimeError):
     def __init__(self, code: int):
         self.code = code
@@ -21,3 +24,15 @@ def is_error_nested(e: BaseException, *error_types: type[BaseException]):
                 if isinstance(e2, error_type):
                     return e2
     return None
+
+
+class _SupportsClose(typing.Protocol):
+    def close(self): ...
+
+
+def close_ignore_errors(sock: _SupportsClose):
+    # noinspection PyBroadException
+    try:
+        sock.close()
+    except BaseException:
+        pass

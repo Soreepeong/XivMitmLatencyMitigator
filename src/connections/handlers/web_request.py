@@ -148,15 +148,21 @@ class WebRequestHandler:
         yield from self._write(b"\r\n")
 
         yield from self._writecsv("time", "fd", "peer_ip", "peer_port", *keys)
+        tcp_info = TcpInfo()
+        rows = []
         while True:
             now = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
+            rows.clear()
             for sock in self._cm.sockets:
                 try:
                     peer_name = sock.getpeername()
                 except socket.error:
                     continue
-                tcp_info = TcpInfo.from_socket(sock)
-                yield from self._writecsv(now, sock.fileno(), *peer_name, *(getattr(tcp_info, x) for x in keys))
+                tcp_info.update_from_socket(sock)
+                rows.append((now, sock.fileno(), *peer_name, *(getattr(tcp_info, x) for x in keys)))
+
+            for row in rows:
+                yield from self._writecsv(row)
 
             yield from self._sleep(stream)
             if stream <= 0:
@@ -217,9 +223,8 @@ class WebRequestConnectionHandler(BaseConnectionHandler):
     def close(self):
         try:
             self._request_handler.throw(EOFError())
-        except:
-            pass
-        self._cleanup.close()
+        finally:
+            self._cleanup.close()
 
     def _handle(self, ev: int) -> None:
         if self._closed:

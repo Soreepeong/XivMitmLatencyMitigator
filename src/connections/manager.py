@@ -1,5 +1,6 @@
 import ctypes
 import dataclasses
+import errno
 import heapq
 import ipaddress
 import logging
@@ -87,7 +88,8 @@ class ConnectionManager:
         else:
             err: socket.error | None = is_error_nested(e, socket.error)
             if err:
-                logging.error(f"[{instance}] broken; errno {err.errno}: {err.strerror}")
+                logging.error(f"[{instance}] broken; errno {err.errno}: {err.strerror}",
+                              exc_info=err.errno != errno.ECONNRESET)
             else:
                 logging.error(f"[{instance}] broken", exc_info=True)
         instance.close()

@@ -107,6 +107,10 @@ class TcpInfo(ctypes.Structure):
         fields = ", ".join(keyval)
         return "{}({})".format(self.__class__.__name__, fields)
 
+    def update_from_socket(self, sock: socket.socket):
+        data = sock.getsockopt(socket.SOL_TCP, socket.TCP_INFO, ctypes.sizeof(self))
+        self.from_buffer_copy(data)
+
     @classmethod
     def from_socket(cls, sock: socket.socket):
         buf = bytearray(ctypes.sizeof(TcpInfo))
