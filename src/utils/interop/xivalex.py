@@ -28,7 +28,7 @@ class OpcodeDefinition:
         ipaddress.IPv6Network |
         tuple[ipaddress.IPv4Address, ipaddress.IPv4Address] |
         tuple[ipaddress.IPv6Address, ipaddress.IPv6Address]
-    ]
+        ]
     Server_PortRange: list[tuple[int, int]]
 
     @classmethod

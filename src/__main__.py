@@ -354,18 +354,18 @@ def __main__() -> int:
             logging.error(str(e))
             return -1
 
-    with ConnectionManager(
-            listeners,
-            args.upstream_interfaces,
-            args.enable_web_statistics,
-            args.nat64,
-            MitigationConfig(
-                args.measure_ping,
-                args.extra_delay,
-                definitions,
-            ),
-    ) as manager:
-        manager.serve_forever()
+    import asyncio
+    asyncio.run(ConnectionManager(
+        listeners,
+        args.upstream_interfaces,
+        args.enable_web_statistics,
+        args.nat64,
+        MitigationConfig(
+            args.measure_ping,
+            args.extra_delay,
+            definitions,
+        ),
+    ).serve_forever())
     return 0
 
 

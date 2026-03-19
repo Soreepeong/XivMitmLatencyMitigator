@@ -27,6 +27,10 @@ def clamp[T](v: T, min_: T, max_: T) -> T:
     return max(min_, min(max_, v))
 
 
+def to_ip_address_and_port(name: tuple) -> tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, int]:
+    return ipaddress.ip_address(name[0]), name[1]
+
+
 def format_addr_port(addr: ipaddress.IPv4Address | ipaddress.IPv6Address | str, port: int, *rest):
     if isinstance(addr, str):
         addr = ipaddress.ip_address(addr)

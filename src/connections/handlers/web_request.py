@@ -1,24 +1,19 @@
-import contextlib
+import asyncio
 import datetime
 import http.server
 import io
-import ipaddress
 import logging
-import selectors
 import socket
-import time
 import typing
 import urllib.parse
 
-from connections.file_bound_selector import FileBoundSelector
 from structs.tcp_info import TcpInfo
-from utils.consts import BLOCKING_IO_ERRORS
-from utils.exceptions import find_expected_stop_error
-from utils.ring_byte_buffer import RingByteBuffer
-from .base import BaseConnectionHandler
 
 if typing.TYPE_CHECKING:
     from connections.manager import ConnectionManager
+
+
+_MAX_HEADER_LENGTH = 32768
 
 
 class HTTPRequest(http.server.BaseHTTPRequestHandler):
@@ -34,243 +29,86 @@ class HTTPRequest(http.server.BaseHTTPRequestHandler):
         self.error_message = message
 
 
-class WebRequestHandler:
-    def __init__(self,
-                 owner: BaseConnectionHandler,
-                 cm: "ConnectionManager",
-                 wbuf: RingByteBuffer,
-                 wbuf_callback: typing.Callable[[], None],
-                 encoding: str = "utf-8",
-                 newline: str = "\r\n"):
-        self._cm = cm
-        self._owner = owner
-        self._wbuf = wbuf
-        self._flush_callback = wbuf_callback
-        self._encoding = encoding
-        self._newline = newline.encode(self._encoding)
-        self._data = bytearray()
-        self._exec = self._handle()
-        self._exec.send(None)
+def _writecsv(writer: asyncio.StreamWriter, *args):
+    parts = []
+    for arg in args:
+        s = str(arg)
+        if '"' in s or ',' in s:
+            s = '"' + s.replace('"', '""') + '"'
+        parts.append(s)
+    writer.write((",".join(parts) + "\r\n").encode("utf-8"))
 
-    def step(self, recv: bytes | bytearray | memoryview | None = None):
-        self._exec.send(recv)
 
-    def throw(self, err: BaseException):
-        self._exec.throw(err)
+async def _route_stats(conn_id: int, cm: "ConnectionManager",
+                       writer: asyncio.StreamWriter,
+                       url: urllib.parse.ParseResult, qs: dict):
+    stream = max(0., float(qs.get('stream', ["0"])[0]))
+    keys = [x for x in dir(TcpInfo()) if x.startswith("tcpi_")]
+    if "cols" in qs:
+        cols = [y for x in qs["cols"] for y in x.split(",")]
+        keys = [x for x in cols if x in keys]
 
-    def _yield(self):
-        recv = yield
-        if recv is None:
-            return
-        if not recv:
-            raise EOFError
-        if len(self._data) + len(recv) > 32768:
-            raise OverflowError
-        self._data.extend(recv)
+    writer.write(b"HTTP/1.1 200 OK\r\n")
+    writer.write(b"Connection: Close\r\n")
+    if url.path.endswith(".csv"):
+        writer.write(b"Content-Type: text/csv; charset=utf-8\r\n")
+    else:
+        writer.write(b"Content-Type: text/plain; charset=utf-8\r\n")
+    writer.write(b"\r\n")
+    _writecsv(writer, "time", "fd", "peer_ip", "peer_port", *keys)
+    await writer.drain()
 
-    def _flush(self):
-        if self._wbuf:
-            self._flush_callback()
-            yield from self._yield()
-
-    def _write(self, *chunks):
-        for chunk in chunks:
-            if not chunk:
-                continue
-            if isinstance(chunk, (bytes, bytearray)):
-                chunk = memoryview(chunk)
-            elif isinstance(chunk, memoryview):
-                pass
-            else:
-                chunk = memoryview(str(chunk).encode(self._encoding))
-
-            while chunk:
-                while True:
-                    buf = self._wbuf.get_write_buffer()
-                    if buf:
-                        break
-                    yield from self._flush()
-
-                wlen = min(len(buf), len(chunk))
-                buf[:wlen] = chunk[:wlen]
-                chunk = chunk[wlen:]
-                self._wbuf.commit_write(wlen)
-
-    def _writeline(self, *chunks):
-        yield from self._write(*chunks, self._newline)
-
-    def _writecsv(self, *args):
-        for i, arg in enumerate(args):
-            if i != 0:
-                yield from self._write(b",")
-            if isinstance(arg, str) and ('"' in arg or ',' in arg):
-                yield from self._write(b'"', arg.replace('"', '""'), b'"')
-            else:
-                yield from self._write(arg)
-        yield from self._writeline()
-
-    def _sleep(self, duration: float):
-        yield from self._flush()
-        timeout = time.time() + duration
-        while timeout > time.time():
-            self._cm.wait_until(timeout, self._owner, self.step)
-            yield from self._yield()
-
-    def _handle(self):
-        while True:
-            yield from self._yield()
-            header_end = self._data.index(b"\r\n\r\n")
-            if header_end != -1:
-                break
-
-        request = HTTPRequest(self._data[:header_end])
-        url = urllib.parse.urlparse(request.path)
-        qs = urllib.parse.parse_qs(url.query)
-        logging.info(f"[{self._owner}] {request.command} {request.path}")
-        if url.path in ("/stats", "/stats.csv"):
-            yield from self._route_stats(request, url, qs)
-        else:
-            yield from self._route_404(request, url, qs)
-        yield from self._flush()
-
-    def _route_stats(self, request: HTTPRequest, url: urllib.parse.ParseResult, qs):
-        stream = max(0., float(qs.get('stream', ["0"])[0]))
-        keys = [x for x in dir(TcpInfo()) if x.startswith("tcpi_")]
-        if "cols" in qs:
-            cols = [y for x in qs["cols"] for y in x.split(",")]
-            keys = [x for x in cols if x in keys]
-
-        yield from self._write(b"HTTP/1.1 200 OK\r\n")
-        yield from self._write(b"Connection: Close\r\n")
-        if url.path.endswith(".csv"):
-            yield from self._write(b"Content-Type: text/csv; charset=utf-8\r\n")
-        else:
-            yield from self._write(b"Content-Type: text/plain; charset=utf-8\r\n")
-        yield from self._write(b"\r\n")
-
-        yield from self._writecsv("time", "fd", "peer_ip", "peer_port", *keys)
-        tcp_info = TcpInfo()
-        rows = []
-        while True:
-            now = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
-            rows.clear()
-            for sock in self._cm.sockets:
-                try:
-                    peer_name = sock.getpeername()
-                except socket.error:
-                    continue
+    tcp_info = TcpInfo()
+    while True:
+        now = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
+        for sock in cm.sockets:
+            try:
+                peer_name = sock.getpeername()
                 tcp_info.update_from_socket(sock)
-                rows.append((now, sock.fileno(), *peer_name, *(getattr(tcp_info, x) for x in keys)))
+            except socket.error:
+                continue
+            _writecsv(writer, now, sock.fileno(), *peer_name, *(getattr(tcp_info, x) for x in keys))
 
-            for row in rows:
-                yield from self._writecsv(row)
+        if stream <= 0:
+            break
 
-            yield from self._sleep(stream)
-            if stream <= 0:
-                break
-
-    def _route_404(self, request: HTTPRequest, url: urllib.parse.ParseResult, qs):
-        yield from self._write(b"HTTP/1.1 404 Not Found\r\n")
-        yield from self._write(b"Connection: Close\r\n")
-        yield from self._write(b"Content-Type: text/plain; charset=utf-8\r\n")
-        yield from self._write(b"\r\n")
-        yield from self._write(b"Not Found\r\n")
+        await writer.drain()
+        await asyncio.sleep(stream)
 
 
-class WebRequestConnectionHandler(BaseConnectionHandler):
-    def __init__(self,
-                 cm: "ConnectionManager",
-                 conn_id: int,
-                 sock: socket.socket,
-                 addr: tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, int],
-                 selector: selectors.BaseSelector):
-        self._cm = cm
-        self._conn_id = conn_id
-        self._sock = sock
-        self._addr = addr
-        self._closed = False
-        self._wbuf = RingByteBuffer(16384)
-        self._event_in = True
-        self._event_out = False
+async def _route_400(writer: asyncio.StreamWriter):
+    writer.write(b"HTTP/1.1 400 Bad Request\r\n")
+    writer.write(b"Connection: Close\r\n")
+    writer.write(b"Content-Type: text/plain; charset=utf-8\r\n")
+    writer.write(b"\r\n")
+    writer.write(b"Bad Request\r\n")
 
-        with contextlib.ExitStack() as self._cleanup:
-            def set_closed():
-                self._closed = True
 
-            self._cleanup.callback(set_closed)
+async def _route_404(writer: asyncio.StreamWriter):
+    writer.write(b"HTTP/1.1 404 Not Found\r\n")
+    writer.write(b"Connection: Close\r\n")
+    writer.write(b"Content-Type: text/plain; charset=utf-8\r\n")
+    writer.write(b"\r\n")
+    writer.write(b"Not Found\r\n")
 
-            self._cleanup.push(sock)
-            sock.setsockopt(socket.SOL_TCP, socket.TCP_NODELAY, 1)
-            sock.setsockopt(socket.SOL_TCP, socket.TCP_QUICKACK, 1)
-            sock.setblocking(False)
 
-            self._request_handler = WebRequestHandler(self, cm, self._wbuf,
-                                                      lambda: self._selector.modify(event_out=True))
+async def handle_web_request(conn_id: int, cm: "ConnectionManager",
+                             reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    data = bytearray()
+    while b"\r\n\r\n" not in data:
+        chunk = await reader.read(8192)
+        if not chunk or len(data) + len(chunk) > _MAX_HEADER_LENGTH:
+            return await _route_400(writer)
+        data.extend(chunk)
 
-            self._selector = self._cleanup.push(FileBoundSelector(self, selector, sock, True, False, self._handle))
-            self._cleanup = self._cleanup.pop_all()
+    header_end = data.index(b"\r\n\r\n")
+    request = HTTPRequest(data[:header_end])
+    url = urllib.parse.urlparse(request.path)
+    qs = urllib.parse.parse_qs(url.query)
+    logging.info(f"[{conn_id:>4}] {request.command} {request.path}")
 
-    def __str__(self):
-        return f"{self._conn_id:>4}"
-
-    @property
-    def closed(self):
-        return self._closed
-
-    @property
-    def sockets(self):
-        yield self._sock
-
-    def close(self):
-        try:
-            self._request_handler.throw(EOFError())
-        except BaseException as e:
-            if not find_expected_stop_error(e):
-                logging.warning(f"[{self}] unexpected exception type during close", exc_info=True)
-        self._cleanup.close()
-
-    def _handle(self, ev: int) -> None:
-        if self._closed:
-            return
-
-        try:
-            if ev & selectors.EVENT_READ:
-                try:
-                    recv = self._sock.recv(8192)
-                    if recv and self._request_handler is None:
-                        self._request_handler = WebRequestHandler(
-                            self,
-                            self._cm,
-                            self._wbuf,
-                            lambda: self._selector.modify(event_out=True))
-                    elif not recv and self._request_handler is None:
-                        raise EOFError
-                    self._request_handler.step(recv)
-                except socket.error as e:
-                    if e.errno not in BLOCKING_IO_ERRORS:
-                        raise
-
-            if ev & selectors.EVENT_WRITE:
-                if self._wbuf:
-                    try:
-                        while True:
-                            buf = self._wbuf.get_read_buffer()
-                            if not buf:
-                                return
-
-                            self._selector.modify(event_out=True)
-                            send_len = self._sock.send(buf)
-                            self._wbuf.commit_read(send_len)
-                    except socket.error as e:
-                        if e.errno not in BLOCKING_IO_ERRORS:
-                            raise
-                else:
-                    self._selector.modify(event_out=False)
-                    if self._wbuf.error:
-                        raise self._wbuf.error
-                    elif self._request_handler is not None:
-                        self._request_handler.step()
-        except BaseException as e:
-            if self._request_handler is not None:
-                self._request_handler.throw(e)
-            raise
+    if url.path in ("/stats", "/stats.csv"):
+        await _route_stats(conn_id, cm, writer, url, qs)
+    else:
+        await _route_404(writer)
+    return await writer.drain()
