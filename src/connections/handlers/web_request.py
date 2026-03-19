@@ -13,6 +13,7 @@ import urllib.parse
 from connections.file_bound_selector import FileBoundSelector
 from structs.tcp_info import TcpInfo
 from utils.consts import BLOCKING_IO_ERRORS
+from utils.exceptions import find_expected_stop_error
 from utils.ring_byte_buffer import RingByteBuffer
 from .base import BaseConnectionHandler
 
@@ -223,8 +224,10 @@ class WebRequestConnectionHandler(BaseConnectionHandler):
     def close(self):
         try:
             self._request_handler.throw(EOFError())
-        finally:
-            self._cleanup.close()
+        except BaseException as e:
+            if not find_expected_stop_error(e):
+                logging.warning(f"[{self}] unexpected exception type during close", exc_info=True)
+        self._cleanup.close()
 
     def _handle(self, ev: int) -> None:
         if self._closed:

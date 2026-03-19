@@ -13,7 +13,7 @@ from connections.handlers import BaseConnectionHandler, ForwardingConnectionHand
 from connections.handlers.forwarding_xiv import ForwardingXivConnectionHandler
 from utils.consts import NAT64_NETWORK
 from utils.consts import SO_ORIGINAL_DST, IP6T_SO_ORIGINAL_DST
-from utils.exceptions import is_error_nested
+from utils.exceptions import find_nested_error, find_expected_stop_error
 from utils.interop.socket import sockaddr_in, sockaddr_in6
 from utils.interop.xivalex import MitigationConfig
 from utils.misc import format_addr_port_tuples
@@ -82,11 +82,11 @@ class ConnectionManager:
                 c.update_statistics()
 
     def _error(self, instance: BaseConnectionHandler, e: BaseException):
-        err: EOFError | StopIteration | None = is_error_nested(e, EOFError, StopIteration)
+        err = find_expected_stop_error(e)
         if err:
             logging.info(f"[{instance}] ended")
         else:
-            err: socket.error | None = is_error_nested(e, socket.error)
+            err = find_nested_error(e, socket.error)
             if err:
                 logging.error(f"[{instance}] broken; errno {err.errno}: {err.strerror}",
                               exc_info=err.errno != errno.ECONNRESET)

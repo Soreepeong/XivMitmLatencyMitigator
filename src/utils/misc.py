@@ -7,8 +7,6 @@ import typing
 
 from utils.consts import NAT64_NETWORK
 
-T = typing.TypeVar("T")
-
 TARGET_ADDRESS_TYPE = typing.Union[
     ipaddress.IPv4Network,
     ipaddress.IPv6Network,
@@ -25,7 +23,7 @@ TARGET_TYPE = tuple[
 ]
 
 
-def clamp(v: T, min_: T, max_: T) -> T:
+def clamp[T](v: T, min_: T, max_: T) -> T:
     return max(min_, min(max_, v))
 
 
