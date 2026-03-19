@@ -1,3 +1,3 @@
-from .base import BaseConnectionHandler
-from .forwarding import ForwardingConnectionHandler
-from .web_request import WebRequestConnectionHandler
+from .forwarding import handle_forwarding
+from .forwarding_xiv import ForwardingXivHandler
+from .web_request import handle_web_request

@@ -181,6 +181,8 @@ class OodleInstance:
         return enc
 
     def decode(self, enc: typing.Union[bytes, bytearray, memoryview], result_length: int) -> bytearray:
+        if not isinstance(enc, (bytearray, memoryview)):
+            enc = bytearray(enc)
         dec = bytearray(result_length)
         if not self._decode_function(
                 ctypes.addressof(self._state),

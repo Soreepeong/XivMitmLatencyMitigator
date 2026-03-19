@@ -260,7 +260,7 @@ class XivBundleHeader(ctypes.LittleEndianStructure):
     decoded_body_length: typing.Union[int, ctypes.c_uint32]
 
     @classmethod
-    def is_xiv_bundle(cls, buf: memoryview):
+    def is_xiv_bundle(cls, buf: bytearray | memoryview) -> bool | None:
         check_len = min(len(cls.MAGIC_CONSTANT_1), len(buf))
         if (cls.MAGIC_CONSTANT_1[:check_len] != buf[:check_len] and
                 cls.MAGIC_CONSTANT_2[:check_len] != buf[:check_len]):

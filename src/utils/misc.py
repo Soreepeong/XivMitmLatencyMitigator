@@ -23,8 +23,27 @@ TARGET_TYPE = tuple[
 ]
 
 
+class DummyAsyncClosable:
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def close(self):
+        pass
+
+    async def wait_closed(self):
+        pass
+
+
 def clamp[T](v: T, min_: T, max_: T) -> T:
     return max(min_, min(max_, v))
+
+
+def to_ip_address_and_port(name: tuple) -> tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, int]:
+    return ipaddress.ip_address(name[0]), name[1]
 
 
 def format_addr_port(addr: ipaddress.IPv4Address | ipaddress.IPv6Address | str, port: int, *rest):
