@@ -29,7 +29,6 @@ from utils.numeric_statistics_tracker import NumericStatisticsTracker
 if typing.TYPE_CHECKING:
     from connections.manager import ConnectionManager
 
-
 _MAX_DETECT_STREAM_TYPE_BUFFER_SIZE = 65536
 
 
@@ -61,24 +60,26 @@ async def _handle_game_direction(
         writer: asyncio.StreamWriter,
         oodle_r: OodleInstance,
         oodle_w: OodleInstance,
-        message_toucher: typing.Callable[[list[tuple[XivMessageHeader, bytearray]]], None]):
+        dry_run: bool,
+        message_toucher: typing.Callable[[list[tuple[XivMessageHeader, bytearray]]], None],
+        bundle_observer: typing.Callable[[XivBundleHeader, list[tuple[XivMessageHeader, bytearray]]], None]):
     header_size = ctypes.sizeof(XivBundleHeader)
     message_header_size = ctypes.sizeof(XivMessageHeader)
     try:
         while True:
             header_bytes = bytearray(await reader.readexactly(header_size))
             header = XivBundleHeader.from_buffer(header_bytes)
-            body = await reader.readexactly(header.length - header_size)
+            raw_body = await reader.readexactly(header.length - header_size)
 
             match header.compression:
                 case 0:
-                    body = bytearray(body)
+                    body = bytearray(raw_body)
                 case 1:
-                    body = bytearray(zlib.decompress(body))
+                    body = bytearray(zlib.decompress(raw_body))
                     if len(body) != header.decoded_body_length:
                         raise InvalidDataException
                 case 2:
-                    body = oodle_r.decode(body, header.decoded_body_length)
+                    body = oodle_r.decode(raw_body, header.decoded_body_length)
                 case _:
                     raise InvalidDataException
 
@@ -92,31 +93,37 @@ async def _handle_game_direction(
                 messages.append((msg_header, msg_data))
                 pos += msg_header.length
 
+            bundle_observer(header, messages)
             message_toucher(messages)
 
-            out = bytearray()
-            for msg_header, msg_data in messages:
-                msg_header.length = message_header_size + len(msg_data)
-                out.extend(bytes(msg_header))
-                out.extend(msg_data)
+            if dry_run:
+                writer.write(header_bytes)
+                writer.write(raw_body)
+                await writer.drain()
+            else:
+                out = bytearray()
+                for msg_header, msg_data in messages:
+                    msg_header.length = message_header_size + len(msg_data)
+                    out.extend(bytes(msg_header))
+                    out.extend(msg_data)
 
-            match header.compression:
-                case 0:
-                    pass
-                case 1:
-                    out = zlib.compress(out)
-                case 2:
-                    out = oodle_w.encode(out)
-                case _:
-                    raise InvalidDataException
+                match header.compression:
+                    case 0:
+                        pass
+                    case 1:
+                        out = zlib.compress(out)
+                    case 2:
+                        out = oodle_w.encode(out)
+                    case _:
+                        raise InvalidDataException
 
-            header.decoded_body_length = sum(ctypes.sizeof(m) + len(d) for m, d in messages)
-            header.message_count = len(messages)
-            header.length = header_size + len(out)
+                header.decoded_body_length = sum(ctypes.sizeof(m) + len(d) for m, d in messages)
+                header.message_count = len(messages)
+                header.length = header_size + len(out)
 
-            writer.write(bytes(header))
-            writer.write(out)
-            await writer.drain()
+                writer.write(bytes(header))
+                writer.write(out)
+                await writer.drain()
     finally:
         with contextlib.suppress(Exception):
             writer.write_eof()
@@ -141,7 +148,7 @@ class ForwardingXivHandler:
 
     async def handle(self,
                      down_reader: asyncio.StreamReader, down_writer: asyncio.StreamWriter,
-                     destination: tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, int],
+                     destination: tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, int, ...],
                      interfaces: list[str]):
         iface, up_sock = await connect_racing(destination, interfaces)
         logging.info(f"[{self._conn_id:>4}] Connected via {iface} from {format_addr_port(*up_sock.getsockname())}")
@@ -150,6 +157,7 @@ class ForwardingXivHandler:
         self._up_sock = up_sock
 
         try:
+            assert self._down_sock is not None
             with self._cm.track_sockets(self._down_sock, up_sock):
                 async with asyncio.TaskGroup() as tg:
                     tg.create_task(self._handle_direction(
@@ -172,7 +180,16 @@ class ForwardingXivHandler:
             logging.info(f"[{self._conn_id:>4}] {label} is a game connection")
             oodle_r = OodleHelper.create(True)
             oodle_w = OodleHelper.create(True)
-            await _handle_game_direction(reader, writer, oodle_r, oodle_w, toucher)
+            up_sock = self._up_sock
+
+            def bundle_observer(header: XivBundleHeader, messages: list[tuple[XivMessageHeader, bytearray]]):
+                for msg_header, msg_data in messages:
+                    self._cm.notify_ffxiv_observers(up_sock, label, header, msg_header, bytes(msg_data))
+
+            await _handle_game_direction(
+                reader, writer,
+                oodle_r, oodle_w,
+                self._xivalex.dry_run, toucher, bundle_observer)
         else:
             logging.info(f"[{self._conn_id:>4}] {label} is not a game connection")
             await _pipe(reader, writer)
@@ -199,7 +216,8 @@ class ForwardingXivHandler:
                 if len(self.pending_actions) == 1:
                     self.last_animation_lock_ends_at = self.pending_actions[-1].request_timestamp
 
-            logging.info(f"[{self._conn_id:>4}] C2S_ActionRequest: actionId={request.action_id:04x} sequence={request.sequence:04x}")
+            logging.info(
+                f"[{self._conn_id:>4}] C2S_ActionRequest: actionId={request.action_id:04x} sequence={request.sequence:04x}")
 
     def _touch_from_upstream(self, messages: list[tuple[XivMessageHeader, bytearray]]):
         message_insertions: list[tuple[int, XivMessageHeader, bytearray]] = []
@@ -337,6 +355,9 @@ class ForwardingXivHandler:
             messages.insert(i, (message_header, message_data))
 
     def _resolve_adjusted_extra_delay(self, rtt: float) -> tuple[float, str]:
+        assert self._down_sock is not None
+        assert self._up_sock is not None
+
         if not self._xivalex.measure_ping:
             return self._xivalex.extra_delay, ""
 
@@ -369,9 +390,9 @@ class ForwardingXivHandler:
 
         rtt_min = self.latency_application.min()
         rtt_mean = self.latency_application.mean()
-        rtt_deviation = self.latency_application.deviation()
-        latency_mean = self.latency_upstream.mean() + self.latency_downstream.mean()
-        latency_deviation = self.latency_upstream.deviation() + self.latency_downstream.deviation()
+        rtt_deviation = self.latency_application.deviation() or 0
+        latency_mean = (self.latency_upstream.mean() or 0) + (self.latency_downstream.mean() or 0)
+        latency_deviation = (self.latency_upstream.deviation() or 0) + (self.latency_downstream.deviation() or 0)
 
         latency = clamp(latency, latency_mean - latency_deviation, latency_mean + latency_deviation)
         rtt = clamp(rtt, rtt_mean - rtt_deviation, rtt_mean + rtt_deviation)

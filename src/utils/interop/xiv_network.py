@@ -21,20 +21,20 @@ class XivMessageIpcActionEffect(ctypes.LittleEndianStructure):
         ("padding_0x022", ctypes.c_uint16),
     )
 
-    animation_target_actor: typing.Union[int, ctypes.c_uint32]
-    unknown_0x004: typing.Union[int, ctypes.c_uint32]
-    action_id: typing.Union[int, ctypes.c_uint32]
-    global_effect_counter: typing.Union[int, ctypes.c_uint32]
-    animation_lock_duration: typing.Union[float, ctypes.c_float]
-    unknown_target_id: typing.Union[int, ctypes.c_uint32]
-    source_sequence: typing.Union[int, ctypes.c_uint16]
-    rotation: typing.Union[int, ctypes.c_uint16]
-    action_animation_id: typing.Union[int, ctypes.c_uint16]
-    variation: typing.Union[int, ctypes.c_uint8]
-    effect_display_type: typing.Union[int, ctypes.c_uint8]
-    unknown_0x020: typing.Union[int, ctypes.c_uint8]
-    effect_count: typing.Union[int, ctypes.c_uint8]
-    padding_0x022: typing.Union[int, ctypes.c_uint16]
+    animation_target_actor: int
+    unknown_0x004: int
+    action_id: int
+    global_effect_counter: int
+    animation_lock_duration: float
+    unknown_target_id: int
+    source_sequence: int
+    rotation: int
+    action_animation_id: int
+    variation: int
+    effect_display_type: int
+    unknown_0x020: int
+    effect_count: int
+    padding_0x022: int
 
 
 class XivMessageIpcActorControlCategory(enum.IntEnum):
@@ -53,13 +53,13 @@ class XivMessageIpcActorControl(ctypes.LittleEndianStructure):
         ("padding_0x014", ctypes.c_uint32),
     )
 
-    category_int: typing.Union[int, ctypes.c_uint16]
-    padding_0x002: typing.Union[int, ctypes.c_uint16]
-    param_1: typing.Union[int, ctypes.c_uint32]
-    param_2: typing.Union[int, ctypes.c_uint32]
-    param_3: typing.Union[int, ctypes.c_uint32]
-    param_4: typing.Union[int, ctypes.c_uint32]
-    padding_0x014: typing.Union[int, ctypes.c_uint32]
+    category_int: int
+    padding_0x002: int
+    param_1: int
+    param_2: int
+    param_3: int
+    param_4: int
+    padding_0x014: int
 
     @property
     def category(self):
@@ -86,15 +86,15 @@ class XivMessageIpcActorControlSelf(ctypes.LittleEndianStructure):
         ("padding_0x01c", ctypes.c_uint32),
     )
 
-    category_int: typing.Union[int, ctypes.c_uint16]
-    padding_0x002: typing.Union[int, ctypes.c_uint16]
-    param_1: typing.Union[int, ctypes.c_uint32]
-    param_2: typing.Union[int, ctypes.c_uint32]
-    param_3: typing.Union[int, ctypes.c_uint32]
-    param_4: typing.Union[int, ctypes.c_uint32]
-    param_5: typing.Union[int, ctypes.c_uint32]
-    param_6: typing.Union[int, ctypes.c_uint32]
-    padding_0x01c: typing.Union[int, ctypes.c_uint32]
+    category_int: int
+    padding_0x002: int
+    param_1: int
+    param_2: int
+    param_3: int
+    param_4: int
+    param_5: int
+    param_6: int
+    padding_0x01c: int
 
     @property
     def category(self):
@@ -125,19 +125,19 @@ class XivMessageIpcActorCast(ctypes.LittleEndianStructure):
         ("unknown_0x01e", ctypes.c_uint16),
     )
 
-    action_id: typing.Union[int, ctypes.c_uint16]
-    skill_type: typing.Union[int, ctypes.c_uint8]
-    unknown_0x003: typing.Union[int, ctypes.c_uint8]
-    action_id_2: typing.Union[int, ctypes.c_uint16]
-    unknown_0x006: typing.Union[int, ctypes.c_uint16]
-    cast_time: typing.Union[float, ctypes.c_float]
-    target_id: typing.Union[int, ctypes.c_uint32]
-    rotation: typing.Union[float, ctypes.c_float]
-    unknown_0x014: typing.Union[int, ctypes.c_uint32]
-    x: typing.Union[int, ctypes.c_uint16]
-    y: typing.Union[int, ctypes.c_uint16]
-    z: typing.Union[int, ctypes.c_uint16]
-    unknown_0x01e: typing.Union[int, ctypes.c_uint16]
+    action_id: int
+    skill_type: int
+    unknown_0x003: int
+    action_id_2: int
+    unknown_0x006: int
+    cast_time: float
+    target_id: int
+    rotation: float
+    unknown_0x014: int
+    x: int
+    y: int
+    z: int
+    unknown_0x01e: int
 
 
 class XivMessageIpcActionRequestCommon(ctypes.LittleEndianStructure):
@@ -147,8 +147,8 @@ class XivMessageIpcActionRequestCommon(ctypes.LittleEndianStructure):
         ("sequence", ctypes.c_uint16),
     )
 
-    action_id: typing.Union[int, ctypes.c_uint32]
-    sequence: typing.Union[int, ctypes.c_uint16]
+    action_id: int
+    sequence: int
 
 
 class XivMessageIpcCustomOriginalWaitTime(ctypes.LittleEndianStructure):
@@ -158,9 +158,9 @@ class XivMessageIpcCustomOriginalWaitTime(ctypes.LittleEndianStructure):
         ("original_wait_time", ctypes.c_float),
     )
 
-    source_sequence: typing.Union[int, ctypes.c_uint16]
-    padding_0x002: typing.Union[int, ctypes.c_uint16] = 0
-    original_wait_time: typing.Union[float, ctypes.c_float]
+    source_sequence: int
+    padding_0x002: int
+    original_wait_time: float
 
 
 class XivMessageIpcType(enum.IntEnum):
@@ -182,12 +182,12 @@ class XivMessageIpcHeader(ctypes.LittleEndianStructure):
         ("unknown_0x00c", ctypes.c_uint32),
     )
 
-    type_int: typing.Union[int, ctypes.c_uint16]
-    subtype: typing.Union[int, ctypes.c_uint16]
-    unknown_0x004: typing.Union[int, ctypes.c_uint16]
-    server_id: typing.Union[int, ctypes.c_uint16]
-    epoch: typing.Union[int, ctypes.c_uint32]
-    unknown_0x00c: typing.Union[int, ctypes.c_uint32]
+    type_int: int
+    subtype: int
+    unknown_0x004: int
+    server_id: int
+    epoch: int
+    unknown_0x00c: int
 
     @property
     def type(self):
@@ -214,11 +214,11 @@ class XivMessageHeader(ctypes.LittleEndianStructure):
         ("unknown_0x00e", ctypes.c_uint16),
     )
 
-    length: typing.Union[int, ctypes.c_uint32]
-    source_actor: typing.Union[int, ctypes.c_uint32]
-    target_actor: typing.Union[int, ctypes.c_uint32]
-    type_int: typing.Union[int, ctypes.c_uint16]
-    unknown_0x00e: typing.Union[int, ctypes.c_uint16]
+    length: int
+    source_actor: int
+    target_actor: int
+    type_int: int
+    unknown_0x00e: int
 
     @property
     def type(self):
@@ -249,15 +249,15 @@ class XivBundleHeader(ctypes.LittleEndianStructure):
         ("decoded_body_length", ctypes.c_uint32),
     )
 
-    magic: typing.Union[bytearray, ctypes.c_byte * 16]
-    timestamp: typing.Union[int, ctypes.c_uint64]
-    length: typing.Union[int, ctypes.c_uint32]
-    conn_type: typing.Union[int, ctypes.c_uint16]
-    message_count: typing.Union[int, ctypes.c_uint16]
-    encoding: typing.Union[int, ctypes.c_uint8]
-    compression: typing.Union[int, ctypes.c_uint8]
-    unknown_0x022: typing.Union[int, ctypes.c_uint16]
-    decoded_body_length: typing.Union[int, ctypes.c_uint32]
+    magic: memoryview
+    timestamp: int
+    length: int
+    conn_type: int
+    message_count: int
+    encoding: int
+    compression: int
+    unknown_0x022: int
+    decoded_body_length: int
 
     @classmethod
     def is_xiv_bundle(cls, buf: bytearray | memoryview) -> bool | None:

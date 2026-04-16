@@ -124,3 +124,7 @@ def listener_from_address(family: int, type: int, proto: int, _canonname: str, s
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
     sock.bind(sockaddr)
     return sock
+
+
+def is_truthy(x: str):
+    return x.lower() in ("yes", "y", "true", "t", "1")

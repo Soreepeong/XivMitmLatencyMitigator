@@ -28,7 +28,7 @@ def get_all_local_addresses(devname: str = None):
 
 def clear_if_addrs(if_name: str):
     for addr, prefix in get_all_local_addresses(if_name):
-        SubprocessFailedError.raise_if_nonzero(os.system(f"ip address delete {addr}/{prefix} dev {if_name}"))
+        SubprocessFailedError.call_or_raise(f"ip address delete {addr}/{prefix} dev {if_name}")
 
 
 def setup_dummy_adapter(if_name: str, *addrs: ipaddress.IPv4Address | ipaddress.IPv6Address, clear_addrs: bool = True):
@@ -55,7 +55,7 @@ def setup_dummy_adapter(if_name: str, *addrs: ipaddress.IPv4Address | ipaddress.
             else:
                 raise ValueError
 
-        SubprocessFailedError.raise_if_nonzero(os.system(f"ip address add {addr} dev {if_name} scope link"))
+        SubprocessFailedError.call_or_raise(f"ip address add {addr} dev {if_name} scope link")
         yield addr
 
 
@@ -245,17 +245,20 @@ def setup_iptables(targets: collections.abc.Iterable[TARGET_TYPE],
 
     for rule in rules4:
         cmd = f"iptables -I {rule}"
-        SubprocessFailedError.raise_if_nonzero(os.system(cmd))
+        SubprocessFailedError.call_or_raise(cmd)
         yield f"iptables -D {rule}\n"
 
     for rule in rules6:
         cmd = f"ip6tables -I {rule}"
-        SubprocessFailedError.raise_if_nonzero(os.system(cmd))
+        SubprocessFailedError.call_or_raise(cmd)
         yield f"ip6tables -D {rule}\n"
 
 
 def get_sysctl(var_name: str):
-    return os.popen(f"sysctl {var_name}").read().split("=", 1)[1].strip()
+    with subprocess.Popen(["sysctl", var_name], stdout=subprocess.PIPE, text=True, shell=True) as proc:
+        res, _ = proc.communicate()
+        SubprocessFailedError.raise_if_nonzero(proc.returncode)
+        return res.split("=", 1)[1].strip()
 
 
 def setup_sysctl():

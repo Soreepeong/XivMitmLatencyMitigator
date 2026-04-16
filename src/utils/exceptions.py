@@ -1,3 +1,9 @@
+import asyncio
+import subprocess
+
+CONNECTION_ERRORS = {asyncio.IncompleteReadError, ConnectionResetError, BrokenPipeError}
+
+
 class SubprocessFailedError(RuntimeError):
     def __init__(self, code: int):
         self.code = code
@@ -6,6 +12,11 @@ class SubprocessFailedError(RuntimeError):
     def raise_if_nonzero(cls, code: int):
         if code != 0:
             raise cls(code)
+
+    @classmethod
+    def call_or_raise(cls, shell_command: str):
+        code = subprocess.call(shell_command, shell=True)
+        cls.raise_if_nonzero(code)
 
 
 class InvalidDataException(ValueError):

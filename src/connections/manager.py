@@ -4,15 +4,39 @@ import ctypes
 import ipaddress
 import logging
 import socket
+import typing
 
 from connections.handlers.forwarding import handle_forwarding
 from connections.handlers.forwarding_xiv import ForwardingXivHandler
 from connections.handlers.web_request import handle_web_request
 from utils.consts import SO_ORIGINAL_DST, IP6T_SO_ORIGINAL_DST, NAT64_NETWORK
-from utils.exceptions import find_nested_error
+from utils.exceptions import find_nested_error, CONNECTION_ERRORS
 from utils.interop.socket import sockaddr_in, sockaddr_in6
 from utils.interop.xivalex import MitigationConfig
 from utils.misc import format_addr_port_tuples, to_ip_address_and_port
+
+if typing.TYPE_CHECKING:
+    from utils.interop.xiv_network import XivBundleHeader, XivMessageHeader
+
+
+class _FfxivObserver:
+    _SENTINEL = object()
+
+    def __init__(self, limit: int = 1000):
+        self._q: asyncio.Queue = asyncio.Queue(limit)
+        self._broken = False
+
+    def put_nowait(self, item):
+        try:
+            self._q.put_nowait(item)
+        except asyncio.QueueFull:
+            self._q.shutdown(True)
+
+    async def get(self):
+        item = await self._q.get()
+        if item is self._SENTINEL:
+            raise ConnectionAbortedError("too many pending messages")
+        return item
 
 
 class ConnectionManager:
@@ -25,11 +49,32 @@ class ConnectionManager:
         self._xivalex = xivalex_mitigation_config
         self._conn_id_counter = 0
         self._active_sockets: set[socket.socket] = set()
+        self._ffxiv_packet_observers: set[asyncio.Queue] = set()
 
     @property
     def tracked_sockets(self):
         yield from self._listeners
         yield from self._active_sockets
+
+    @contextlib.contextmanager
+    def ffxiv_packet_observer(self, limit: int = 1000):
+        obs = asyncio.Queue(limit)
+        self._ffxiv_packet_observers.add(obs)
+        try:
+            yield obs
+        finally:
+            obs.shutdown(True)
+            self._ffxiv_packet_observers.discard(obs)
+
+    def notify_ffxiv_observers(self, sock: socket.socket, direction: str,
+                               bundle_header: "XivBundleHeader", message_header: "XivMessageHeader",
+                               message_data: bytes):
+        if not self._ffxiv_packet_observers:
+            return
+        item = (sock, direction, bundle_header.timestamp, bundle_header.conn_type, message_header,
+                bytearray(message_data))
+        for obs in self._ffxiv_packet_observers:
+            obs.put_nowait(item)
 
     @contextlib.contextmanager
     def track_sockets(self, *socks: socket.socket):
@@ -79,7 +124,10 @@ class ConnectionManager:
                 if definitions := [f for f in self._xivalex.definitions if f.is_applicable(*up_addr)]:
                     handler = ForwardingXivHandler(
                         conn_id, self,
-                        MitigationConfig(self._xivalex.measure_ping, self._xivalex.extra_delay, definitions))
+                        MitigationConfig(self._xivalex.dry_run,
+                                         self._xivalex.measure_ping,
+                                         self._xivalex.extra_delay,
+                                         definitions))
                     await handler.handle(reader, writer, up_addr, self._upstream_interfaces)
                 else:
                     await handle_forwarding(conn_id, self, reader, writer, up_addr, self._upstream_interfaces)
@@ -90,7 +138,7 @@ class ConnectionManager:
                 logging.info(f"Rejected " + format_addr_port_tuples(down_addr, up_addr, sep=" > "))
 
         except Exception as e:
-            err = find_nested_error(e, asyncio.IncompleteReadError, ConnectionResetError, BrokenPipeError)
+            err = find_nested_error(e, *CONNECTION_ERRORS)
             if err:
                 return
 

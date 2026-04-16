@@ -83,6 +83,7 @@ class OpcodeDefinition:
 
 @dataclasses.dataclass(frozen=True)
 class MitigationConfig:
+    dry_run: bool
     measure_ping: bool
     extra_delay: float
     definitions: list[OpcodeDefinition]

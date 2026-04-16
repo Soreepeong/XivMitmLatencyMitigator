@@ -9,6 +9,7 @@ import pathlib
 import pwd
 import signal
 import socket
+import subprocess
 import sys
 import time
 import typing
@@ -39,7 +40,8 @@ class ArgumentTuple:
     opcode_json_path: str | None = None
     ffxiv_exe_urls: list[str] = dataclasses.field(default_factory=list)
     upstream_interfaces: list[str] = dataclasses.field(default_factory=list)
-    working_directory: str | None = None
+    mitigate_dry_run: bool = False
+    working_directory: str = ""
     dummy_addr4: str = "0.0.0.0"
     dummy_addr6: str = "::0"
     nftables_meta_mark: int = 0xFF14EE03
@@ -215,6 +217,9 @@ def __main__() -> int:
     parser.add_argument("-x", "--exe", action="append",
                         dest="ffxiv_exe_urls", default=defaults.ffxiv_exe_urls,
                         help="Download ffxiv.exe and/or ffxiv_dx11.exe from specified URL (exe or patch file.)")
+    parser.add_argument("--mitigate-dry-run", action="store_true",
+                        dest="mitigate_dry_run", default=defaults.mitigate_dry_run,
+                        help="Do not actually apply any mitigation, just print what would have happened.")
     parser.add_argument("--dummy-addr4", action="store",
                         dest="dummy_addr4", default=defaults.dummy_addr4,
                         help="Dummy IPv4 address for redirecting to this application's socket.")
@@ -236,7 +241,7 @@ def __main__() -> int:
 
     args = ArgumentTuple(**vars(parser.parse_args()))
 
-    if args.working_directory is None:
+    if args.working_directory == "":
         args.working_directory = os.getcwd()
 
     if sys.platform != 'linux':
@@ -264,7 +269,7 @@ def __main__() -> int:
 
     cleanup_filepath = os.path.join(args.working_directory, ".cleanup.sh")
     if os.path.exists(cleanup_filepath):
-        os.system(cleanup_filepath)
+        subprocess.call(cleanup_filepath, shell=True)
         os.remove(cleanup_filepath)
 
     pid = -1
@@ -274,8 +279,8 @@ def __main__() -> int:
 
             # https://serverfault.com/questions/975558/nftables-ip6-route-to-localhost-ipv6-nat-to-loopback
             fp.write(f"ip link delete {DUMMY_NET_NAME}\n")
-            SubprocessFailedError.raise_if_nonzero(os.system(f"ip link add {DUMMY_NET_NAME} type dummy"))
-            SubprocessFailedError.raise_if_nonzero(os.system(f"ip link set {DUMMY_NET_NAME} up"))
+            SubprocessFailedError.call_or_raise(f"ip link add {DUMMY_NET_NAME} type dummy")
+            SubprocessFailedError.call_or_raise(f"ip link set {DUMMY_NET_NAME} up")
 
             listeners = list(listener_from_address(*y) for y in get_listen_sockaddrs(args, getaddrinfo))
             if any(x.family == socket.AF_INET6 for x in listeners):
@@ -312,7 +317,7 @@ def __main__() -> int:
 
             logging.info("Cleaning up...")
             if os.path.exists(cleanup_filepath):
-                os.system(cleanup_filepath)
+                subprocess.call(cleanup_filepath, shell=True)
                 os.remove(cleanup_filepath)
             logging.info("Cleanup complete.")
 
@@ -361,6 +366,7 @@ def __main__() -> int:
         args.enable_web_statistics,
         args.nat64,
         MitigationConfig(
+            args.mitigate_dry_run,
             args.measure_ping,
             args.extra_delay,
             definitions,
