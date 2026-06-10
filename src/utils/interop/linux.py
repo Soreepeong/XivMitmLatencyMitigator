@@ -261,6 +261,20 @@ def get_sysctl(var_name: str):
         return res.split("=", 1)[1].strip()
 
 
+def get_ping_group_range() -> tuple[int, int] | None:
+    """Return the current (low, high) net.ipv4.ping_group_range, or None if it cannot be read."""
+    try:
+        with subprocess.Popen(["sysctl", "-n", "net.ipv4.ping_group_range"],
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True) as proc:
+            res, _ = proc.communicate()
+        if proc.returncode != 0:
+            return None
+        low, high = (int(x) for x in res.split())
+        return low, high
+    except (OSError, ValueError):
+        return None
+
+
 def setup_sysctl(extra_vars: dict | None = None):
     sysctl_vars = {**SYSCTL_VARS, **(extra_vars or {})}
     with subprocess.Popen(["sysctl", *sysctl_vars.keys()], stdout=subprocess.PIPE, text=True) as proc:
@@ -300,5 +314,16 @@ def setup_system_configuration(targets: collections.abc.Iterable[TARGET_TYPE],
         extra_sysctl_vars = {}
         if serve_gid is not None:
             # Permit the unprivileged serving group to open ICMP ping sockets for latency probing.
-            extra_sysctl_vars["net.ipv4.ping_group_range"] = f"{serve_gid} {serve_gid}"
+            # Only touch the system-wide range when the serving group is not already allowed, and
+            # then *widen* the existing range instead of replacing it — replacing it would revoke
+            # other users' (e.g. the login user's) ability to use ICMP ping at all.
+            current = get_ping_group_range()
+            if current is not None:
+                low, high = current
+                if low > high:
+                    # Disabled range (low > high): enable exactly the serving group.
+                    extra_sysctl_vars["net.ipv4.ping_group_range"] = f"{serve_gid} {serve_gid}"
+                elif not low <= serve_gid <= high:
+                    extra_sysctl_vars["net.ipv4.ping_group_range"] = \
+                        f"{min(low, serve_gid)} {max(high, serve_gid)}"
         yield from setup_sysctl(extra_sysctl_vars)
