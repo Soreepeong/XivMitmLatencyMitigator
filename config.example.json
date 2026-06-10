@@ -1,0 +1,32 @@
+{
+  "targets": [],
+  "firewall": "none",
+  "listen": [],
+  "write_sysctl": false,
+  "enable_web_statistics": false,
+  "regions": [],
+  "extra_delay": 0.075,
+  "measure_ping": false,
+  "update_opcodes": false,
+  "opcode_json_path": null,
+  "ffxiv_exe_urls": [],
+  "upstream_interfaces": [],
+  "icmp_attempts": 7,
+  "icmp_interval_min": 0.1,
+  "icmp_interval_max": 0.3,
+  "icmp_penalties": [
+    "^wg-.*=5.0",
+    "^ppp.*=10.0",
+    "^wlan.*=3.0"
+  ],
+  "icmp_debug": false,
+  "icmp_cache_ttl": 30.0,
+  "mitigate_dry_run": false,
+  "working_directory": "",
+  "dummy_addr4": "0.0.0.0",
+  "dummy_addr6": "::0",
+  "nftables_meta_mark": 4279561731,
+  "nat64": "none",
+  "dns_lookup_timeout": 30,
+  "serve_as": "nobody"
+}

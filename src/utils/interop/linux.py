@@ -261,8 +261,9 @@ def get_sysctl(var_name: str):
         return res.split("=", 1)[1].strip()
 
 
-def setup_sysctl():
-    with subprocess.Popen(["sysctl", *SYSCTL_VARS.keys()], stdout=subprocess.PIPE, text=True) as proc:
+def setup_sysctl(extra_vars: dict | None = None):
+    sysctl_vars = {**SYSCTL_VARS, **(extra_vars or {})}
+    with subprocess.Popen(["sysctl", *sysctl_vars.keys()], stdout=subprocess.PIPE, text=True) as proc:
         res, _ = proc.communicate()
         SubprocessFailedError.raise_if_nonzero(proc.returncode)
         yield " ".join(shlex.quote(x) for x in [
@@ -272,7 +273,7 @@ def setup_sysctl():
             *re.sub(r'\s*=\s*', '=', res).splitlines(),
         ]) + "\n"
 
-    with subprocess.Popen(["sysctl", "-q", "-w", *(f"{k}={v}" for k, v in SYSCTL_VARS.items())]) as proc:
+    with subprocess.Popen(["sysctl", "-q", "-w", *(f"{k}={v}" for k, v in sysctl_vars.items())]) as proc:
         proc.communicate()
         SubprocessFailedError.raise_if_nonzero(proc.returncode)
 
@@ -281,7 +282,8 @@ def setup_system_configuration(targets: collections.abc.Iterable[TARGET_TYPE],
                                firewall: str,
                                nftables_meta_mark: int,
                                write_sysctl: bool,
-                               sockets: collections.abc.Iterable[socket.socket]):
+                               sockets: collections.abc.Iterable[socket.socket],
+                               serve_gid: int | None = None):
     addr_tuples = [(ipaddress.ip_address(x), port) for x, port, *_ in [x.getsockname() for x in sockets]]
 
     match firewall:
@@ -295,4 +297,8 @@ def setup_system_configuration(targets: collections.abc.Iterable[TARGET_TYPE],
             raise AssertionError
 
     if write_sysctl:
-        yield from setup_sysctl()
+        extra_sysctl_vars = {}
+        if serve_gid is not None:
+            # Permit the unprivileged serving group to open ICMP ping sockets for latency probing.
+            extra_sysctl_vars["net.ipv4.ping_group_range"] = f"{serve_gid} {serve_gid}"
+        yield from setup_sysctl(extra_sysctl_vars)

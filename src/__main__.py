@@ -3,6 +3,7 @@ import argparse
 import dataclasses
 import grp
 import ipaddress
+import json
 import logging.handlers
 import os
 import pathlib
@@ -17,6 +18,7 @@ import typing
 from connections.manager import ConnectionManager
 from utils.consts import DUMMY_NET_NAME
 from utils.exceptions import SubprocessFailedError
+from utils.icmp_race import FindBestInterfaceConfig
 from utils.interop.linux import TARGET_TYPE, setup_system_configuration, setup_dummy_adapter
 from utils.interop.oodle import OodleWithBudgetAbiThunks, test_oodle
 from utils.interop.win32 import POINTER_SIZE
@@ -40,6 +42,12 @@ class ArgumentTuple:
     opcode_json_path: str | None = None
     ffxiv_exe_urls: list[str] = dataclasses.field(default_factory=list)
     upstream_interfaces: list[str] = dataclasses.field(default_factory=list)
+    icmp_attempts: int = 7
+    icmp_interval_min: float = 0.1
+    icmp_interval_max: float = 0.3
+    icmp_penalties: list[str] = dataclasses.field(default_factory=list)
+    icmp_debug: bool = False
+    icmp_cache_ttl: float = 30.0
     mitigate_dry_run: bool = False
     working_directory: str = ""
     dummy_addr4: str = "0.0.0.0"
@@ -154,6 +162,34 @@ def get_definitions(args: ArgumentTuple) -> list[OpcodeDefinition]:
     return definitions
 
 
+def load_config_into(base: ArgumentTuple, path: str) -> ArgumentTuple:
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise ValueError("config file must contain a JSON object")
+    valid = {f.name for f in dataclasses.fields(ArgumentTuple)}
+    unknown = sorted(k for k in data if k not in valid)
+    if unknown:
+        raise ValueError(f"unknown config keys: {', '.join(unknown)}")
+    return dataclasses.replace(base, **data)
+
+
+def build_icmp_config(args: ArgumentTuple) -> FindBestInterfaceConfig:
+    penalties: dict[str, float] = {}
+    for item in args.icmp_penalties:
+        pattern, sep, value = item.rpartition("=")
+        if not sep or not pattern:
+            raise ValueError(f"Invalid --icmp-penalty {item!r}; expected REGEX=MS, e.g. '^wg-.*=5'")
+        penalties[pattern] = float(value)
+    return FindBestInterfaceConfig(
+        num_attempts=args.icmp_attempts,
+        interval=(args.icmp_interval_min, args.icmp_interval_max),
+        penalties=penalties,
+        debug=args.icmp_debug,
+        cache_ttl=args.icmp_cache_ttl,
+    )
+
+
 def get_setuidgid(name: str) -> tuple[int | None, int | None]:
     if name == "":
         return None, None
@@ -177,7 +213,24 @@ def __main__() -> int:
 
     parser = argparse.ArgumentParser("XivMitmLatencyMitigator",
                                      description="https://github.com/Soreepeong/XivMitmLatencyMitigator")
+
+    # Resolve -c/--config first so its values become the defaults for every other argument,
+    # letting explicit command-line arguments still override the config file.
+    config_pre_parser = argparse.ArgumentParser(add_help=False)
+    config_pre_parser.add_argument("-c", "--config", dest="config", default=None)
+    config_path = config_pre_parser.parse_known_args()[0].config
+
     defaults = ArgumentTuple()
+    if config_path is not None:
+        try:
+            defaults = load_config_into(defaults, config_path)
+        except (OSError, ValueError) as e:
+            logging.error(f"Failed to load config {config_path!r}: {e}")
+            return -1
+
+    parser.add_argument("-c", "--config", action="store", dest="config", default=None,
+                        help="Load options from a JSON config file. Any field listed in config.example.json "
+                             "may be set; command-line arguments override config file values.")
     parser.add_argument("-t", "--target", action="append",
                         dest="targets", default=defaults.targets,
                         help="Target host names or IPv4 addresses to take over, optionally with prefix length.")
@@ -190,6 +243,28 @@ def __main__() -> int:
     parser.add_argument("-i", "--interface", action="append",
                         dest="upstream_interfaces", default=defaults.upstream_interfaces,
                         help="Specify which interface to use for upstream connections. May be specified multiple times.")
+    parser.add_argument("--icmp-attempts", action="store", type=int,
+                        dest="icmp_attempts", default=defaults.icmp_attempts,
+                        help="Number of ICMP echo probes per interface when choosing the best upstream interface. "
+                             "Only used when more than one -i interface is given.")
+    parser.add_argument("--icmp-interval-min", action="store", type=float,
+                        dest="icmp_interval_min", default=defaults.icmp_interval_min,
+                        help="Minimum delay in seconds between consecutive ICMP echo probes.")
+    parser.add_argument("--icmp-interval-max", action="store", type=float,
+                        dest="icmp_interval_max", default=defaults.icmp_interval_max,
+                        help="Maximum delay in seconds between consecutive ICMP echo probes.")
+    parser.add_argument("--icmp-penalty", action="append", metavar="REGEX=MS",
+                        dest="icmp_penalties", default=defaults.icmp_penalties,
+                        help="Add a score penalty in milliseconds to interfaces whose name matches REGEX, "
+                             "e.g. '^wg-.*=5'. May be specified multiple times.")
+    parser.add_argument("--icmp-debug", action="store_true",
+                        dest="icmp_debug", default=defaults.icmp_debug,
+                        help="Log per-probe ICMP measurement details when choosing the best interface.")
+    parser.add_argument("--icmp-cache-ttl", action="store", type=float,
+                        dest="icmp_cache_ttl", default=defaults.icmp_cache_ttl,
+                        help="Seconds to cache the chosen best interface per destination IP, so a "
+                             "session's multiple connections to one server reuse a single measurement. "
+                             "0 disables caching.")
     parser.add_argument("-d", "--directory", action="store",
                         dest="working_directory", default=defaults.working_directory,
                         help="Directory to look for and store supporting files.")
@@ -239,7 +314,9 @@ def __main__() -> int:
                         dest="serve_as", default=defaults.serve_as,
                         help="setuid/gid to the specified user(:group) before starting to serve.")
 
-    args = ArgumentTuple(**vars(parser.parse_args()))
+    parsed = vars(parser.parse_args())
+    parsed.pop("config", None)
+    args = ArgumentTuple(**parsed)
 
     if args.working_directory == "":
         args.working_directory = os.getcwd()
@@ -250,6 +327,12 @@ def __main__() -> int:
 
     if args.extra_delay < 0:
         logging.warning("Extra delay cannot be a negative number.")
+        return -1
+
+    try:
+        icmp_config = build_icmp_config(args)
+    except ValueError as e:
+        logging.error(str(e))
         return -1
 
     download_exes(*args.ffxiv_exe_urls)
@@ -288,7 +371,7 @@ def __main__() -> int:
             targets = dedup_targets(targets)
 
             fp.writelines(setup_system_configuration(
-                targets, args.firewall, args.nftables_meta_mark, args.write_sysctl, listeners))
+                targets, args.firewall, args.nftables_meta_mark, args.write_sysctl, listeners, gid))
 
         for listener in listeners:
             listener.listen()
@@ -371,6 +454,7 @@ def __main__() -> int:
             args.extra_delay,
             definitions,
         ),
+        icmp_config,
     ).serve_forever())
     return 0
 

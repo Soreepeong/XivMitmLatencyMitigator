@@ -1,4 +1,7 @@
 definitions.json
+config.json
+
+__pycache__
 
 ffxiv.exe
 ffxiv_dx11.exe

@@ -28,6 +28,7 @@ from utils.numeric_statistics_tracker import NumericStatisticsTracker
 
 if typing.TYPE_CHECKING:
     from connections.manager import ConnectionManager
+    from utils.icmp_race import FindBestInterfaceConfig
 
 _MAX_DETECT_STREAM_TYPE_BUFFER_SIZE = 65536
 
@@ -149,8 +150,9 @@ class ForwardingXivHandler:
     async def handle(self,
                      down_reader: asyncio.StreamReader, down_writer: asyncio.StreamWriter,
                      destination: tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, int, ...],
-                     interfaces: list[str]):
-        iface, up_sock = await connect_racing(destination, interfaces)
+                     interfaces: list[str],
+                     icmp_config: "FindBestInterfaceConfig | None" = None):
+        iface, up_sock = await connect_racing(destination, interfaces, icmp_config)
         logging.info(f"[{self._conn_id:>4}] Connected via {iface} from {format_addr_port(*up_sock.getsockname())}")
         up_reader, up_writer = await asyncio.open_connection(sock=up_sock)
         self._down_sock = down_writer.get_extra_info('socket')
