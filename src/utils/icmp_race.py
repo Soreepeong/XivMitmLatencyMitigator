@@ -4,6 +4,7 @@ import socket
 import struct
 import time
 import asyncio
+import contextlib
 import dataclasses
 import logging
 import math
@@ -85,6 +86,12 @@ async def _send_and_listen(
     delays = []
     tx_times = {}
     expected_seqs = set()
+    warmed_up = asyncio.Event()
+
+    # Keep base_seq low enough that base_seq + num_attempts (the warm-up sequence) still fits in the
+    # signed 16-bit ICMP sequence field.
+    base_seq = hash(interface) % (0x8000 - (num_attempts + 1))
+    warmup_seq = base_seq + num_attempts
 
     async def listen_loop():
         try:
@@ -100,7 +107,11 @@ async def _send_and_listen(
                 # this socket; match on the sequence number alone.
                 type_val, code, _, _, sequence = struct.unpack("bbHHh", packet[:8])
 
-                if type_val == 0 and sequence in expected_seqs:
+                if type_val != 0:
+                    continue
+                if sequence == warmup_seq:
+                    warmed_up.set()  # tunnel/path is up; the warm-up reply is not measured
+                elif sequence in expected_seqs:
                     delay = (recv_time - tx_times[sequence]) * 1000
                     delays.append(delay)
                     if debug:
@@ -112,7 +123,13 @@ async def _send_and_listen(
 
     try:
         await asyncio.sleep(random.uniform(0.001, 0.05))
-        base_seq = (hash(interface) & 0x7FFF)
+
+        # Warm-up: a first probe to trigger any one-time, on-demand path setup (notably a WireGuard
+        # handshake) whose latency would otherwise be charged to the first real measurement. Its
+        # reply is discarded; wait briefly for it so the path is established before measuring.
+        sock.sendto(_create_packet(packet_id, warmup_seq), (destination, 1))
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(warmed_up.wait(), timeout=1.0)
 
         for i in range(num_attempts):
             seq = base_seq + i
