@@ -28,5 +28,6 @@
   "nftables_meta_mark": 4279561731,
   "nat64": "none",
   "dns_lookup_timeout": 30,
-  "serve_as": "nobody"
+  "serve_as": "nobody",
+  "cleanup_directory": "./xivmitm-cleanup"
 }

@@ -1,5 +1,7 @@
 #!/usr/bin/sudo python
 import argparse
+import asyncio
+import contextlib
 import dataclasses
 import grp
 import ipaddress
@@ -8,6 +10,7 @@ import logging.handlers
 import os
 import pathlib
 import pwd
+import re
 import signal
 import socket
 import subprocess
@@ -56,6 +59,7 @@ class ArgumentTuple:
     nat64: str = "none"
     dns_lookup_timeout: float = 30
     serve_as: str = "nobody"
+    cleanup_directory: str = "/tmp/xivmitm-cleanup"
 
 
 def create_getaddrinfo_with_timeout(timeout: float):
@@ -204,6 +208,37 @@ def get_setuidgid(name: str) -> tuple[int | None, int | None]:
         raise ValueError("must be in the format of username:groupname, if not username only")
 
 
+def wait_for_child_shutdown(pid: int) -> int:
+    while True:
+        try:
+            return os.waitpid(pid, 0)[1]
+        except ChildProcessError:
+            return 0
+        except KeyboardInterrupt:
+            break
+
+    with contextlib.suppress(ProcessLookupError):
+        os.kill(pid, signal.SIGTERM)
+
+    deadline = time.monotonic() + 5
+    killed = False
+    while True:
+        try:
+            reaped, status = os.waitpid(pid, os.WNOHANG)
+            if reaped != 0:
+                return status
+            if not killed and time.monotonic() >= deadline:
+                killed = True
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(pid, signal.SIGKILL)
+            time.sleep(0.05)
+        except ChildProcessError:
+            return 0
+        except KeyboardInterrupt:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGTERM)
+
+
 def __main__() -> int:
     logging.basicConfig(level=logging.INFO, force=True,
                         format="%(asctime)s\t%(process)d(main)\t%(levelname)s\t%(message)s",
@@ -313,6 +348,11 @@ def __main__() -> int:
     parser.add_argument("--serve-as", action="store",
                         dest="serve_as", default=defaults.serve_as,
                         help="setuid/gid to the specified user(:group) before starting to serve.")
+    parser.add_argument("--cleanup-directory", action="store",
+                        dest="cleanup_directory", default=defaults.cleanup_directory,
+                        help="Directory to store per-process cleanup scripts. On startup, "
+                             "cleanup scripts left behind by no-longer-running processes are run "
+                             "and removed.")
 
     parsed = vars(parser.parse_args())
     parsed.pop("config", None)
@@ -350,15 +390,40 @@ def __main__() -> int:
         targets.append(ipaddress.IPv4Address("0.0.0.0/0"))
         targets.append(ipaddress.IPv6Address("::0/0"))
 
-    cleanup_filepath = os.path.join(args.working_directory, ".cleanup.sh")
-    if os.path.exists(cleanup_filepath):
-        subprocess.call(cleanup_filepath, shell=True)
-        os.remove(cleanup_filepath)
+    cleanup_dir = pathlib.Path(args.cleanup_directory)
+    if not cleanup_dir.exists():
+        os.makedirs(cleanup_dir, exist_ok=True)
+    elif not cleanup_dir.is_dir():
+        logging.error(f"Cleanup directory {cleanup_dir} is not a directory.")
+        return -1
+    else:
+        for f in cleanup_dir.iterdir():
+            if not re.fullmatch(r'cleanup-[0-9A-F]{6}\\.sh', f.name):
+                logging.info(f"Stale cleanup: Ignoring {f.name}")
+                continue
+            logging.info(f"Stale cleanup: Running {f.name}")
+            with contextlib.suppress(OSError):
+                subprocess.call([f.resolve()], shell=True)
+    cleanup_filepath = (cleanup_dir / f"cleanup-{os.getpid():06X}.sh").resolve()
 
-    pid = -1
+    pid = os.fork()
+    if pid != 0:
+        try:
+            logging.info("Press Ctrl+C to quit.")
+            return wait_for_child_shutdown(pid)
+        finally:
+            logging.info("Cleaning up...")
+            with contextlib.suppress(OSError, KeyboardInterrupt):
+                subprocess.call([cleanup_filepath], shell=True)
+
     try:
         with open(cleanup_filepath, "w", opener=lambda path, flags: os.open(path, flags, 0o755)) as fp:
-            fp.write("#!/bin/sh\n")
+            fp.writelines((
+                "#!/bin/sh\n"
+                f'if [ "$1" != "--force" ] && kill -0 {os.getpid()} 2>/dev/null; then\n'
+                "    exit 0\n"
+                "fi\n"
+            ))
 
             # https://serverfault.com/questions/975558/nftables-ip6-route-to-localhost-ipv6-nat-to-loopback
             fp.write(f"ip link delete {DUMMY_NET_NAME}\n")
@@ -373,36 +438,17 @@ def __main__() -> int:
             fp.writelines(setup_system_configuration(
                 targets, args.firewall, args.nftables_meta_mark, args.write_sysctl, listeners, gid))
 
+            fp.write('rm -f -- "$0"\n')
+
         for listener in listeners:
             listener.listen()
             logging.info(f"Listening on: {format_addr_port(*listener.getsockname())}")
-        logging.info("Press Ctrl+C to quit.")
-
-        pid = os.fork()
-        if pid != 0:
-            for listener in listeners:
-                listener.close()
-            return os.waitpid(pid, 0)[1]
 
     except SubprocessFailedError as e:
         return e.code
 
     except KeyboardInterrupt:
         return 0
-
-    finally:
-        if pid != 0:
-            if pid != -1:
-                try:
-                    os.kill(pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
-
-            logging.info("Cleaning up...")
-            if os.path.exists(cleanup_filepath):
-                subprocess.call(cleanup_filepath, shell=True)
-                os.remove(cleanup_filepath)
-            logging.info("Cleanup complete.")
 
     logging.basicConfig(level=logging.INFO, force=True,
                         format="%(asctime)s\t%(process)d(child)\t%(levelname)s\t%(message)s",
@@ -442,7 +488,6 @@ def __main__() -> int:
             logging.error(str(e))
             return -1
 
-    import asyncio
     asyncio.run(ConnectionManager(
         listeners,
         args.upstream_interfaces,

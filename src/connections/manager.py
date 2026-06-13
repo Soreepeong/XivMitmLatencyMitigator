@@ -3,6 +3,7 @@ import contextlib
 import ctypes
 import ipaddress
 import logging
+import signal
 import socket
 import typing
 
@@ -88,6 +89,11 @@ class ConnectionManager:
             for s in socks:
                 self._active_sockets.discard(s)
 
+    def close_active_sockets(self):
+        for sock in list(self._active_sockets):
+            with contextlib.suppress(OSError):
+                sock.shutdown(socket.SHUT_RDWR)
+
     async def _handle_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         self._conn_id_counter += 1
         conn_id = self._conn_id_counter
@@ -161,14 +167,27 @@ class ConnectionManager:
             logging.info(f"[{conn_id:>4}] ended")
 
     async def serve_forever(self):
+        loop = asyncio.get_running_loop()
+        stop = asyncio.Event()
+
+        handled_signals = []
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.add_signal_handler(sig, stop.set)
+                handled_signals.append(sig)
+            except (NotImplementedError, RuntimeError, ValueError):
+                pass
+
         servers: list[asyncio.Server] = []
         try:
             for listener in self._listeners:
                 servers.append(await asyncio.start_server(self._handle_connection, sock=listener))
-            async with asyncio.TaskGroup() as tg:
-                for server in servers:
-                    tg.create_task(server.serve_forever())
+            await stop.wait()
         finally:
+            self.close_active_sockets()
+            for sig in handled_signals:
+                with contextlib.suppress(Exception):
+                    loop.remove_signal_handler(sig)
             for server in servers:
                 server.close()
             for listener in self._listeners:
