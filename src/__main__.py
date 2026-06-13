@@ -4,22 +4,23 @@ import asyncio
 import contextlib
 import dataclasses
 import grp
+import io
 import ipaddress
 import json
 import logging.handlers
 import os
 import pathlib
 import pwd
-import re
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import time
 import typing
 
 from connections.manager import ConnectionManager
-from utils.consts import DUMMY_NET_NAME
+from utils.consts import DUMMY_NET_NAME, CLEANUP_FILE_NAME
 from utils.exceptions import SubprocessFailedError
 from utils.icmp_race import FindBestInterfaceConfig
 from utils.interop.linux import TARGET_TYPE, setup_system_configuration, setup_dummy_adapter
@@ -141,111 +142,7 @@ def parse_opcode_definitions(definitions: list[OpcodeDefinition]) -> typing.Iter
             yield iprange, [x[0] if x[0] == x[1] else x for x in definition.Server_PortRange]
 
 
-def get_listen_sockaddrs(args: ArgumentTuple, getaddrinfo):
-    sockaddrs = []
-    for x in setup_dummy_adapter(
-            DUMMY_NET_NAME, ipaddress.IPv4Address(args.dummy_addr4), ipaddress.IPv6Address(args.dummy_addr6)):
-        if isinstance(x, ipaddress.IPv4Address):
-            yield from getaddrinfo(str(x), 0, socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP)
-        elif isinstance(x, ipaddress.IPv6Address):
-            yield from getaddrinfo(f"{x}%{DUMMY_NET_NAME}", 0, socket.AF_INET6, socket.SOCK_STREAM, socket.IPPROTO_TCP)
-        else:
-            raise AssertionError
-    for x in args.listen:
-        yield from getaddrinfo_for_tcp_with_port(x, getaddrinfo)
-    return sockaddrs
-
-
-def get_definitions(args: ArgumentTuple) -> list[OpcodeDefinition]:
-    if "off" in args.regions:
-        return []
-
-    definitions = load_definitions(args.working_directory, args.update_opcodes, args.opcode_json_path)
-    if args.regions and (args.opcode_json_path is None or args.opcode_json_path.strip() == ""):
-        definitions = [x for x in definitions if any(r.lower() in x.Name.lower() for r in args.regions)]
-    return definitions
-
-
-def load_config_into(base: ArgumentTuple, path: str) -> ArgumentTuple:
-    with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    if not isinstance(data, dict):
-        raise ValueError("config file must contain a JSON object")
-    valid = {f.name for f in dataclasses.fields(ArgumentTuple)}
-    unknown = sorted(k for k in data if k not in valid)
-    if unknown:
-        raise ValueError(f"unknown config keys: {', '.join(unknown)}")
-    return dataclasses.replace(base, **data)
-
-
-def build_icmp_config(args: ArgumentTuple) -> FindBestInterfaceConfig:
-    penalties: dict[str, float] = {}
-    for item in args.icmp_penalties:
-        pattern, sep, value = item.rpartition("=")
-        if not sep or not pattern:
-            raise ValueError(f"Invalid --icmp-penalty {item!r}; expected REGEX=MS, e.g. '^wg-.*=5'")
-        penalties[pattern] = float(value)
-    return FindBestInterfaceConfig(
-        num_attempts=args.icmp_attempts,
-        interval=(args.icmp_interval_min, args.icmp_interval_max),
-        penalties=penalties,
-        debug=args.icmp_debug,
-        cache_ttl=args.icmp_cache_ttl,
-    )
-
-
-def get_setuidgid(name: str) -> tuple[int | None, int | None]:
-    if name == "":
-        return None, None
-
-    serve_as = name.split(":")
-    if len(serve_as) == 1:
-        t = pwd.getpwnam(serve_as[0])
-        return t.pw_uid, t.pw_gid
-    elif len(serve_as) == 2:
-        return pwd.getpwnam(serve_as[0]).pw_uid, grp.getgrnam(serve_as[1]).gr_gid
-    else:
-        raise ValueError("must be in the format of username:groupname, if not username only")
-
-
-def wait_for_child_shutdown(pid: int) -> int:
-    while True:
-        try:
-            return os.waitpid(pid, 0)[1]
-        except ChildProcessError:
-            return 0
-        except KeyboardInterrupt:
-            break
-
-    with contextlib.suppress(ProcessLookupError):
-        os.kill(pid, signal.SIGTERM)
-
-    deadline = time.monotonic() + 5
-    killed = False
-    while True:
-        try:
-            reaped, status = os.waitpid(pid, os.WNOHANG)
-            if reaped != 0:
-                return status
-            if not killed and time.monotonic() >= deadline:
-                killed = True
-                with contextlib.suppress(ProcessLookupError):
-                    os.kill(pid, signal.SIGKILL)
-            time.sleep(0.05)
-        except ChildProcessError:
-            return 0
-        except KeyboardInterrupt:
-            with contextlib.suppress(ProcessLookupError):
-                os.kill(pid, signal.SIGTERM)
-
-
-def __main__() -> int:
-    logging.basicConfig(level=logging.INFO, force=True,
-                        format="%(asctime)s\t%(process)d(main)\t%(levelname)s\t%(message)s",
-                        handlers=[
-                            logging.StreamHandler(sys.stderr),
-                        ])
-
+def load_arguments() -> ArgumentTuple:
     parser = argparse.ArgumentParser("XivMitmLatencyMitigator",
                                      description="https://github.com/Soreepeong/XivMitmLatencyMitigator")
 
@@ -259,9 +156,8 @@ def __main__() -> int:
     if config_path is not None:
         try:
             defaults = load_config_into(defaults, config_path)
-        except (OSError, ValueError) as e:
-            logging.error(f"Failed to load config {config_path!r}: {e}")
-            return -1
+        except Exception as e:
+            raise RuntimeError(f"Failed to load config {config_path!r}") from e
 
     parser.add_argument("-c", "--config", action="store", dest="config", default=None,
                         help="Load options from a JSON config file. Any field listed in config.example.json "
@@ -361,102 +257,112 @@ def __main__() -> int:
     if args.working_directory == "":
         args.working_directory = os.getcwd()
 
-    if sys.platform != 'linux':
-        logging.error("This script only runs on Linux.")
-        return -1
-
     if args.extra_delay < 0:
         logging.warning("Extra delay cannot be a negative number.")
         return -1
 
-    try:
-        icmp_config = build_icmp_config(args)
-    except ValueError as e:
-        logging.error(str(e))
-        return -1
+    return args
 
-    download_exes(*args.ffxiv_exe_urls)
-    definitions = get_definitions(args)
-    uid, gid = get_setuidgid(args.serve_as)
 
-    getaddrinfo = create_getaddrinfo_with_timeout(args.dns_lookup_timeout)
+def get_listen_sockaddrs(args: ArgumentTuple, getaddrinfo):
+    sockaddrs = []
+    for x in setup_dummy_adapter(
+            DUMMY_NET_NAME, ipaddress.IPv4Address(args.dummy_addr4), ipaddress.IPv6Address(args.dummy_addr6)):
+        if isinstance(x, ipaddress.IPv4Address):
+            yield from getaddrinfo(str(x), 0, socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP)
+        elif isinstance(x, ipaddress.IPv6Address):
+            yield from getaddrinfo(f"{x}%{DUMMY_NET_NAME}", 0, socket.AF_INET6, socket.SOCK_STREAM, socket.IPPROTO_TCP)
+        else:
+            raise AssertionError
+    for x in args.listen:
+        yield from getaddrinfo_for_tcp_with_port(x, getaddrinfo)
+    return sockaddrs
 
-    targets = [
-        *parse_args_targets(args.targets, getaddrinfo),
-        *parse_opcode_definitions(definitions),
-    ]
 
-    if len(targets) == 0:
-        targets.append(ipaddress.IPv4Address("0.0.0.0/0"))
-        targets.append(ipaddress.IPv6Address("::0/0"))
+def get_definitions(args: ArgumentTuple) -> list[OpcodeDefinition]:
+    if "off" in args.regions:
+        return []
 
-    cleanup_dir = pathlib.Path(args.cleanup_directory)
-    if not cleanup_dir.exists():
-        os.makedirs(cleanup_dir, exist_ok=True)
-    elif not cleanup_dir.is_dir():
-        logging.error(f"Cleanup directory {cleanup_dir} is not a directory.")
-        return -1
+    definitions = load_definitions(args.working_directory, args.update_opcodes, args.opcode_json_path)
+    if args.regions and (args.opcode_json_path is None or args.opcode_json_path.strip() == ""):
+        definitions = [x for x in definitions if any(r.lower() in x.Name.lower() for r in args.regions)]
+    return definitions
+
+
+def load_config_into(base: ArgumentTuple, path: str) -> ArgumentTuple:
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise ValueError("config file must contain a JSON object")
+    valid = {f.name for f in dataclasses.fields(ArgumentTuple)}
+    unknown = sorted(k for k in data if k not in valid)
+    if unknown:
+        raise ValueError(f"unknown config keys: {', '.join(unknown)}")
+    return dataclasses.replace(base, **data)
+
+
+def build_icmp_config(args: ArgumentTuple) -> FindBestInterfaceConfig:
+    penalties: dict[str, float] = {}
+    for item in args.icmp_penalties:
+        pattern, sep, value = item.rpartition("=")
+        if not sep or not pattern:
+            raise ValueError(f"Invalid --icmp-penalty {item!r}; expected REGEX=MS, e.g. '^wg-.*=5'")
+        penalties[pattern] = float(value)
+    return FindBestInterfaceConfig(
+        num_attempts=args.icmp_attempts,
+        interval=(args.icmp_interval_min, args.icmp_interval_max),
+        penalties=penalties,
+        debug=args.icmp_debug,
+        cache_ttl=args.icmp_cache_ttl,
+    )
+
+
+def get_setuidgid(name: str) -> tuple[int | None, int | None]:
+    if name == "":
+        return None, None
+
+    serve_as = name.split(":")
+    if len(serve_as) == 1:
+        t = pwd.getpwnam(serve_as[0])
+        return t.pw_uid, t.pw_gid
+    elif len(serve_as) == 2:
+        return pwd.getpwnam(serve_as[0]).pw_uid, grp.getgrnam(serve_as[1]).gr_gid
     else:
-        for f in cleanup_dir.iterdir():
-            if not re.fullmatch(r'cleanup-[0-9A-F]{6}\\.sh', f.name):
-                logging.info(f"Stale cleanup: Ignoring {f.name}")
-                continue
-            logging.info(f"Stale cleanup: Running {f.name}")
-            with contextlib.suppress(OSError):
-                subprocess.call([f.resolve()], shell=True)
-    cleanup_filepath = (cleanup_dir / f"cleanup-{os.getpid():06X}.sh").resolve()
+        raise ValueError("must be in the format of username:groupname, if not username only")
 
-    pid = os.fork()
-    if pid != 0:
+
+def wait_for_child_shutdown(pid: int) -> int:
+    while True:
         try:
-            logging.info("Press Ctrl+C to quit.")
-            return wait_for_child_shutdown(pid)
-        finally:
-            logging.info("Cleaning up...")
-            with contextlib.suppress(OSError, KeyboardInterrupt):
-                subprocess.call([cleanup_filepath], shell=True)
+            return os.waitpid(pid, 0)[1]
+        except ChildProcessError:
+            return 0
+        except KeyboardInterrupt:
+            break
 
-    try:
-        with open(cleanup_filepath, "w", opener=lambda path, flags: os.open(path, flags, 0o755)) as fp:
-            fp.writelines((
-                "#!/bin/sh\n"
-                f'if [ "$1" != "--force" ] && kill -0 {os.getpid()} 2>/dev/null; then\n'
-                "    exit 0\n"
-                "fi\n"
-            ))
+    with contextlib.suppress(ProcessLookupError):
+        os.kill(pid, signal.SIGTERM)
 
-            # https://serverfault.com/questions/975558/nftables-ip6-route-to-localhost-ipv6-nat-to-loopback
-            fp.write(f"ip link delete {DUMMY_NET_NAME}\n")
-            SubprocessFailedError.call_or_raise(f"ip link add {DUMMY_NET_NAME} type dummy")
-            SubprocessFailedError.call_or_raise(f"ip link set {DUMMY_NET_NAME} up")
+    deadline = time.monotonic() + 5
+    killed = False
+    while True:
+        try:
+            reaped, status = os.waitpid(pid, os.WNOHANG)
+            if reaped != 0:
+                return status
+            if not killed and time.monotonic() >= deadline:
+                killed = True
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(pid, signal.SIGKILL)
+            time.sleep(0.05)
+        except ChildProcessError:
+            return 0
+        except KeyboardInterrupt:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGTERM)
 
-            listeners = list(listener_from_address(*y) for y in get_listen_sockaddrs(args, getaddrinfo))
-            if any(x.family == socket.AF_INET6 for x in listeners):
-                targets.extend(generate_nat64_targets(targets))
-            targets = dedup_targets(targets)
 
-            fp.writelines(setup_system_configuration(
-                targets, args.firewall, args.nftables_meta_mark, args.write_sysctl, listeners, gid))
-
-            fp.write('rm -f -- "$0"\n')
-
-        for listener in listeners:
-            listener.listen()
-            logging.info(f"Listening on: {format_addr_port(*listener.getsockname())}")
-
-    except SubprocessFailedError as e:
-        return e.code
-
-    except KeyboardInterrupt:
-        return 0
-
-    logging.basicConfig(level=logging.INFO, force=True,
-                        format="%(asctime)s\t%(process)d(child)\t%(levelname)s\t%(message)s",
-                        handlers=[
-                            logging.StreamHandler(sys.stderr),
-                        ])
-
-    ffxiv_bytes = None
+def read_ffxiv_bytes(args: ArgumentTuple) -> bytes | None:
     if "off" not in args.regions:
         ffxiv_exe_filepath = os.path.join(args.working_directory, "ffxiv.exe")
         ffxiv_dx11_exe_filepath = os.path.join(args.working_directory, "ffxiv_dx11.exe")
@@ -465,43 +371,161 @@ def __main__() -> int:
                 raise RuntimeError("Need ffxiv.exe in the same directory. "
                                    "Copy one from your local Windows/Mac installation.")
 
-            ffxiv_bytes = pathlib.Path(ffxiv_exe_filepath).read_bytes()
+            return pathlib.Path(ffxiv_exe_filepath).read_bytes()
         elif POINTER_SIZE == 8:
             if not os.path.exists(ffxiv_dx11_exe_filepath):
                 raise RuntimeError("Need ffxiv_dx11.exe in the same directory. "
                                    "Copy one from your local Windows/Mac installation.")
 
-            ffxiv_bytes = pathlib.Path(ffxiv_dx11_exe_filepath).read_bytes()
+            return pathlib.Path(ffxiv_dx11_exe_filepath).read_bytes()
         else:
             raise RuntimeError("Platform not supported. Only x86 and x64 systems are supported.")
+    return None
 
-    if gid is not None:
-        os.setgid(gid)
-    if uid is not None:
-        os.setuid(uid)
 
-    if ffxiv_bytes is not None:
+def setup_cleanup_file(args: ArgumentTuple) -> tuple[str, io.TextIOWrapper]:
+    cleanup_dir = pathlib.Path(args.cleanup_directory)
+
+    euid = os.geteuid()
+    os.makedirs(cleanup_dir, mode=0o755, exist_ok=True)
+    os.chmod(cleanup_dir, 0o755)  # normalize regardless of the inherited umask
+
+    info = os.stat(cleanup_dir, follow_symlinks=False)
+    if not stat.S_ISDIR(info.st_mode):
+        raise RuntimeError(f"Cleanup directory {cleanup_dir} is not a directory.")
+
+    if info.st_uid != euid:
+        raise RuntimeError(f"Cleanup directory {cleanup_dir} is owned by uid {info.st_uid}, not the current "
+                           f"uid {euid}; refusing to run scripts from it. Remove it and retry.")
+    if info.st_mode & 0o022:
+        raise RuntimeError(f"Cleanup directory {cleanup_dir} is writable by group/other "
+                           f"(mode {stat.S_IMODE(info.st_mode):04o}); refusing to run scripts from it. "
+                           f"Run `chmod 0755 {cleanup_dir}` or remove it and retry.")
+
+    for f in cleanup_dir.iterdir():
+        if os.access(f, os.X_OK):
+            logging.info(f"Stale cleanup: Running {f.name}")
+            with contextlib.suppress(OSError):
+                subprocess.call([f.resolve()], shell=True)
+
+    cleanup_file = cleanup_dir / CLEANUP_FILE_NAME
+    return (str(cleanup_file.resolve()),
+            open(cleanup_file, "w", opener=lambda path, flags: os.open(path, flags, 0o755)))
+
+
+def __main__() -> int:
+    try:
+        signal.signal(signal.SIGTERM, signal.default_int_handler)
+        logging.basicConfig(level=logging.INFO, force=True,
+                            format="%(asctime)s\t%(process)d(main)\t%(levelname)s\t%(message)s",
+                            handlers=[
+                                logging.StreamHandler(sys.stderr),
+                            ])
+
+        args = load_arguments()
+
+        if sys.platform != 'linux':
+            raise RuntimeError("This script only runs on Linux.")
+
+        icmp_config = build_icmp_config(args)
+
+        download_exes(*args.ffxiv_exe_urls)
+        definitions = get_definitions(args)
+        uid, gid = get_setuidgid(args.serve_as)
+
+        getaddrinfo = create_getaddrinfo_with_timeout(args.dns_lookup_timeout)
+
+        targets = [
+            *parse_args_targets(args.targets, getaddrinfo),
+            *parse_opcode_definitions(definitions),
+        ]
+
+        if len(targets) == 0:
+            targets.append(ipaddress.IPv4Address("0.0.0.0/0"))
+            targets.append(ipaddress.IPv6Address("::0/0"))
+
         try:
+            cleanup_filepath, cleanup_fp = setup_cleanup_file(args)
+        except Exception as e:
+            raise RuntimeError(f"Failed to setup cleanup file") from e
+
+        pid = os.fork()
+        if pid != 0:
+            cleanup_fp.close()
+            try:
+                logging.info("Press Ctrl+C to quit.")
+                return wait_for_child_shutdown(pid)
+            finally:
+                logging.info("Cleaning up...")
+                with contextlib.suppress(OSError, KeyboardInterrupt):
+                    subprocess.call([cleanup_filepath], shell=True)
+
+        logging.basicConfig(level=logging.INFO, force=True,
+                            format="%(asctime)s\t%(process)d(child)\t%(levelname)s\t%(message)s",
+                            handlers=[
+                                logging.StreamHandler(sys.stderr),
+                            ])
+
+        ffxiv_bytes = read_ffxiv_bytes(args)
+
+        with cleanup_fp:
+            cleanup_fp.writelines((
+                "#!/bin/sh\n"
+                f'if [ "$1" != "--force" ] && kill -0 {os.getpid()} 2>/dev/null; then\n'
+                "    exit 0\n"
+                "fi\n"
+            ))
+
+            # https://serverfault.com/questions/975558/nftables-ip6-route-to-localhost-ipv6-nat-to-loopback
+            cleanup_fp.write(f"ip link delete {DUMMY_NET_NAME}\n")
+            SubprocessFailedError.call_or_raise(f"ip link add {DUMMY_NET_NAME} type dummy")
+            SubprocessFailedError.call_or_raise(f"ip link set {DUMMY_NET_NAME} up")
+
+            listeners = list(listener_from_address(*y) for y in get_listen_sockaddrs(args, getaddrinfo))
+            if any(x.family == socket.AF_INET6 for x in listeners):
+                targets.extend(generate_nat64_targets(targets))
+            targets = dedup_targets(targets)
+
+            cleanup_fp.writelines(setup_system_configuration(
+                targets, args.firewall, args.nftables_meta_mark, args.write_sysctl, listeners, gid))
+
+            cleanup_fp.write('rm -f -- "$0"\n')
+
+        for listener in listeners:
+            listener.listen()
+            logging.info(f"Listening on: {format_addr_port(*listener.getsockname())}")
+
+        if gid is not None:
+            os.setgid(gid)
+        if uid is not None:
+            os.setuid(uid)
+
+        if ffxiv_bytes is not None:
             OodleWithBudgetAbiThunks.init_module(ffxiv_bytes)
             test_oodle()
-        except Exception as e:
-            logging.error(str(e))
-            return -1
 
-    asyncio.run(ConnectionManager(
-        listeners,
-        args.upstream_interfaces,
-        args.enable_web_statistics,
-        args.nat64,
-        MitigationConfig(
-            args.mitigate_dry_run,
-            args.measure_ping,
-            args.extra_delay,
-            definitions,
-        ),
-        icmp_config,
-    ).serve_forever())
-    return 0
+        asyncio.run(ConnectionManager(
+            listeners,
+            args.upstream_interfaces,
+            args.enable_web_statistics,
+            args.nat64,
+            MitigationConfig(
+                args.mitigate_dry_run,
+                args.measure_ping,
+                args.extra_delay,
+                definitions,
+            ),
+            icmp_config,
+        ).serve_forever())
+        return 0
+    except SubprocessFailedError as e:
+        logging.error(str(e))
+        return e.code
+    except KeyboardInterrupt:
+        return 0
+    except ValueError as e:
+        logging.error(str(e))
+        return -1
 
 
 if __name__ == "__main__":

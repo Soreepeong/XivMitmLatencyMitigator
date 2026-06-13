@@ -14,6 +14,7 @@ SYSCTL_VARS = {
 }
 NFTABLES_TABLE_NAME = f"mitm-{os.getpid():06X}"
 DUMMY_NET_NAME = f"mitm-{os.getpid():06X}"
+CLEANUP_FILE_NAME = f"cleanup-{os.getpid():06X}.sh"
 
 NAT64_NETWORK = ipaddress.IPv6Network("64:ff9b::/96")
 
