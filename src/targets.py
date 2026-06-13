@@ -4,7 +4,7 @@ import time
 import typing
 
 from arguments import ArgumentTuple
-from utils.interop.linux import TARGET_TYPE
+from utils.interop.linux import TARGET_TYPE, TARGET_PORT_TYPE
 from utils.interop.xivalex import load_definitions, OpcodeDefinition
 
 
@@ -25,27 +25,33 @@ def create_getaddrinfo_with_timeout(timeout: float):
     return getaddrinfo
 
 
+def parse_ports(spec: str) -> list[TARGET_PORT_TYPE]:
+    ports: list[TARGET_PORT_TYPE] = []
+    for item in spec.split(","):
+        if "-" in item:
+            lo, hi = item.split("-", 1)
+            ports.append((int(lo.strip()), int(hi.strip())))
+        else:
+            ports.append(int(item))
+    return ports
+
+
 def parse_args_targets(targets: list[str], getaddrinfo) -> typing.Iterable[TARGET_TYPE]:
     for target in targets:
         target = target.strip()
+        ports: list[TARGET_PORT_TYPE]
         if target.startswith("["):
             if "]:" in target:
-                target, ports = target[1:].split("]:", 1)
-                ports = [
-                    tuple(int(y.strip()) for y in x.split("-", 2)) if "-" in x else int(x)
-                    for x in ports.split(",")
-                ]
+                target, port_spec = target[1:].split("]:", 1)
+                ports = parse_ports(port_spec)
             elif target.endswith("]"):
                 target = target[1:-1]
                 ports = [None]
             else:
                 raise ValueError(f"\"{target}\" is not a valid target")
         elif ":" in target:
-            target, ports = target.split(":", 1)
-            ports = [
-                tuple(int(y.strip()) for y in x.split("-", 2)) if "-" in x else int(x)
-                for x in ports.split(",")
-            ]
+            target, port_spec = target.split(":", 1)
+            ports = parse_ports(port_spec)
         else:
             ports = [None]
 
@@ -89,6 +95,8 @@ def parse_opcode_definitions(definitions: list[OpcodeDefinition]) -> typing.Iter
 
 def get_definitions(args: ArgumentTuple) -> list[OpcodeDefinition]:
     if "off" in args.regions:
+        if len(args.regions) != 1:
+            raise ValueError(f'"{args.regions}" may only contain "off" or anything else')
         return []
 
     definitions = load_definitions(args.working_directory, args.update_opcodes, args.opcode_json_path)
