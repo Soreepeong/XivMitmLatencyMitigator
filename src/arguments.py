@@ -8,7 +8,7 @@ from utils.icmp_race import FindBestInterfaceConfig
 
 @dataclasses.dataclass
 class ArgumentTuple:
-    targets: list[str] = dataclasses.field(default_factory=list)
+    targets: list[str] | dict[str, list[str]] = dataclasses.field(default_factory=list)
     firewall: str = "none"
     listen: list[str] = dataclasses.field(default_factory=list)
     write_sysctl: bool = False
@@ -19,7 +19,7 @@ class ArgumentTuple:
     update_opcodes: bool = False
     opcode_json_path: str | None = None
     ffxiv_exe_urls: list[str] = dataclasses.field(default_factory=list)
-    upstream_interfaces: list[str] = dataclasses.field(default_factory=list)
+    upstream_interfaces: list[str] | dict[str, list[str]] = dataclasses.field(default_factory=list)
     icmp_attempts: int = 7
     icmp_interval_min: float = 0.1
     icmp_interval_max: float = 0.3
@@ -35,6 +35,72 @@ class ArgumentTuple:
     dns_lookup_timeout: float = 30
     serve_as: str = "nobody"
     cleanup_directory: str = "/tmp/xivmitm-cleanup"
+
+    def interface_groups(self) -> dict[str, list[str]]:
+        if isinstance(self.upstream_interfaces, dict):
+            return {name: list(members) for name, members in self.upstream_interfaces.items()}
+        return {}
+
+    def all_interfaces(self) -> list[str]:
+        if isinstance(self.upstream_interfaces, dict):
+            lists = self.upstream_interfaces.values()
+        else:
+            lists = [self.upstream_interfaces]
+        seen: set[str] = set()
+        out: list[str] = []
+        for members in lists:
+            for iface in members:
+                if iface not in seen:
+                    seen.add(iface)
+                    out.append(iface)
+        return out
+
+    def target_routes(self) -> list[tuple[str, list[str]]]:
+        groups = self.interface_groups()
+        all_ifaces = self.all_interfaces()
+
+        if isinstance(self.targets, dict):
+            items = self.targets.items()
+        else:
+            items = ((spec, None) for spec in self.targets)
+
+        routes: list[tuple[str, list[str]]] = []
+        for spec, group_names in items:
+            if not group_names:
+                routes.append((spec, list(all_ifaces)))
+                continue
+            seen: set[str] = set()
+            ifaces: list[str] = []
+            for name in group_names:
+                if name not in groups:
+                    raise ValueError(f"target {spec!r} references unknown upstream interface group {name!r}")
+                for iface in groups[name]:
+                    if iface not in seen:
+                        seen.add(iface)
+                        ifaces.append(iface)
+            routes.append((spec, ifaces))
+        return routes
+
+
+def _merge_targets(config_value: list[str] | dict[str, list[str]],
+                   cli_values: list[str]) -> list[str] | dict[str, list[str]]:
+    if isinstance(config_value, dict):
+        merged = {spec: list(groups) for spec, groups in config_value.items()}
+        for spec in cli_values:
+            merged.setdefault(spec, [])  # no group => all interfaces
+        return merged
+    return list(config_value) + list(cli_values)
+
+
+def _merge_interfaces(config_value: list[str] | dict[str, list[str]],
+                      cli_values: list[str]) -> list[str] | dict[str, list[str]]:
+    if isinstance(config_value, dict):
+        if not cli_values:
+            return {name: list(members) for name, members in config_value.items()}
+        merged = {name: list(members) for name, members in config_value.items()}
+        merged.setdefault("", []).extend(cli_values)
+        return merged
+    return list(config_value) + list(cli_values)
 
 
 def load_config_into(base: ArgumentTuple, path: str) -> ArgumentTuple:
@@ -86,8 +152,9 @@ def load_arguments() -> ArgumentTuple:
                         help="Load options from a JSON config file. Any field listed in config.example.json "
                              "may be set; command-line arguments override config file values.")
     parser.add_argument("-t", "--target", action="append",
-                        dest="targets", default=defaults.targets,
-                        help="Target host names or IPv4 addresses to take over, optionally with prefix length.")
+                        dest="cli_targets", default=[],
+                        help="Target host names or IPv4 addresses to take over, optionally with prefix length. "
+                             "Appended to any targets from the config file; each uses all upstream interfaces.")
     parser.add_argument("-l", "--listen", action="append",
                         dest="listen", default=defaults.listen,
                         help="IP address and port to listen to.")
@@ -95,8 +162,9 @@ def load_arguments() -> ArgumentTuple:
                         dest="firewall", default=defaults.firewall, choices=["none", "iptables", "nftables"],
                         help="Firewall to use to enable NAT towards this application.")
     parser.add_argument("-i", "--interface", action="append",
-                        dest="upstream_interfaces", default=defaults.upstream_interfaces,
-                        help="Specify which interface to use for upstream connections. May be specified multiple times.")
+                        dest="cli_upstream_interfaces", default=[],
+                        help="Specify which interface to use for upstream connections. May be specified multiple times. "
+                             "Appended to any interfaces from the config file.")
     parser.add_argument("--icmp-attempts", action="store", type=int,
                         dest="icmp_attempts", default=defaults.icmp_attempts,
                         help="Number of ICMP echo probes per interface when choosing the best upstream interface. "
@@ -175,6 +243,9 @@ def load_arguments() -> ArgumentTuple:
 
     parsed = vars(parser.parse_args())
     parsed.pop("config", None)
+    parsed["targets"] = _merge_targets(defaults.targets, parsed.pop("cli_targets"))
+    parsed["upstream_interfaces"] = _merge_interfaces(
+        defaults.upstream_interfaces, parsed.pop("cli_upstream_interfaces"))
     args = ArgumentTuple(**parsed)
 
     if args.working_directory == "":

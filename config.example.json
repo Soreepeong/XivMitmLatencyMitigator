@@ -1,5 +1,10 @@
 {
-  "targets": [],
+  "targets": {
+    "neolobby01.ffxiv.com/23:54992-55040": ["isp-1", "isp-2", "vpn-jp"],
+    "neolobby02.ffxiv.com/24:54992-55040": ["isp-1", "isp-2", "vpn-na"],
+    "neolobby06.ffxiv.com/24:54992-55040": ["isp-1", "isp-2", "vpn-eu"],
+    "neolobby09.ffxiv.com/24:54992-55040": ["isp-1", "isp-2", "vpn-au"]
+  },
   "firewall": "none",
   "listen": [],
   "write_sysctl": false,
@@ -10,7 +15,14 @@
   "update_opcodes": false,
   "opcode_json_path": null,
   "ffxiv_exe_urls": [],
-  "upstream_interfaces": [],
+  "upstream_interfaces": {
+    "isp-1": ["enp1s0", "enp2s0"],
+    "isp-2": ["enp3s0", "enp4s0"],
+    "vpn-jp": ["wg-jp"],
+    "vpn-eu": ["wg-eu"],
+    "vpn-na": ["wg-na"],
+    "vpn-au": ["wg-au"]
+  },
   "icmp_attempts": 7,
   "icmp_interval_min": 0.1,
   "icmp_interval_max": 0.3,

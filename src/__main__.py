@@ -1,6 +1,5 @@
 #!/usr/bin/sudo python
 import asyncio
-import contextlib
 import ipaddress
 import logging.handlers
 import os
@@ -13,7 +12,8 @@ from arguments import build_icmp_config, load_arguments
 from bootstrap import get_listen_sockaddrs, get_setuidgid, read_ffxiv_bytes, setup_cleanup_file, \
     wait_for_child_shutdown
 from connections.manager import ConnectionManager
-from targets import create_getaddrinfo_with_timeout, get_definitions, parse_args_targets, parse_opcode_definitions
+from targets import create_getaddrinfo_with_timeout, get_definitions, parse_args_targets, \
+    parse_opcode_definitions, UpstreamRouter
 from utils.consts import DUMMY_NET_NAME
 from utils.exceptions import SubprocessFailedError
 from utils.interop.linux import setup_system_configuration
@@ -45,14 +45,17 @@ def __main__() -> int:
 
         getaddrinfo = create_getaddrinfo_with_timeout(args.dns_lookup_timeout)
 
-        targets = [
-            *parse_args_targets(args.targets, getaddrinfo),
-            *parse_opcode_definitions(definitions),
+        all_interfaces = args.all_interfaces()
+        routed_targets = [
+            *parse_args_targets(args.target_routes(), getaddrinfo),
+            *((addr, ports, all_interfaces) for addr, ports in parse_opcode_definitions(definitions)),
         ]
 
-        if len(targets) == 0:
-            targets.append(ipaddress.IPv4Address("0.0.0.0/0"))
-            targets.append(ipaddress.IPv6Address("::0/0"))
+        if len(routed_targets) == 0:
+            routed_targets.append((ipaddress.IPv4Network("0.0.0.0/0"), [None], all_interfaces))
+            routed_targets.append((ipaddress.IPv6Network("::/0"), [None], all_interfaces))
+
+        upstream_router = UpstreamRouter(routed_targets, all_interfaces)
 
         try:
             cleanup_filepath, cleanup_fp = setup_cleanup_file(args)
@@ -92,12 +95,13 @@ def __main__() -> int:
                 SubprocessFailedError.call_or_raise(f"ip link set {DUMMY_NET_NAME} up")
 
                 listeners = list(listener_from_address(*y) for y in get_listen_sockaddrs(args, getaddrinfo))
+                firewall_targets = [(addr, ports) for addr, ports, _ in routed_targets]
                 if any(x.family == socket.AF_INET6 for x in listeners):
-                    targets.extend(generate_nat64_targets(targets))
-                targets = dedup_targets(targets)
+                    firewall_targets.extend(generate_nat64_targets(firewall_targets))
+                firewall_targets = dedup_targets(firewall_targets)
 
                 cleanup_fp.writelines(setup_system_configuration(
-                    targets, args.firewall, args.nftables_meta_mark, args.write_sysctl, listeners, gid))
+                    firewall_targets, args.firewall, args.nftables_meta_mark, args.write_sysctl, listeners, gid))
 
             finally:
                 cleanup_fp.write('rm -f -- "$0"\n')
@@ -117,7 +121,7 @@ def __main__() -> int:
 
         asyncio.run(ConnectionManager(
             listeners,
-            args.upstream_interfaces,
+            upstream_router,
             args.enable_web_statistics,
             args.nat64,
             MitigationConfig(

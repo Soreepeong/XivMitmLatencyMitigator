@@ -18,6 +18,7 @@ from utils.interop.xivalex import MitigationConfig
 from utils.misc import format_addr_port_tuples, to_ip_address_and_port
 
 if typing.TYPE_CHECKING:
+    from targets import UpstreamRouter
     from utils.interop.xiv_network import XivBundleHeader, XivMessageHeader
 
 
@@ -42,11 +43,11 @@ class _FfxivObserver:
 
 
 class ConnectionManager:
-    def __init__(self, listeners: list[socket.socket], upstream_interfaces: list[str], enable_web: bool, nat64: str,
+    def __init__(self, listeners: list[socket.socket], upstream_router: "UpstreamRouter", enable_web: bool, nat64: str,
                  xivalex_mitigation_config: MitigationConfig,
                  icmp_config: FindBestInterfaceConfig | None = None):
         self._listeners = listeners
-        self._upstream_interfaces = upstream_interfaces
+        self._upstream_router = upstream_router
         self._enable_web = enable_web
         self._nat64 = nat64
         self._xivalex = xivalex_mitigation_config
@@ -130,6 +131,7 @@ class ConnectionManager:
 
             if local_addr != up_addr:
                 logging.info(f"[{conn_id:>4}] " + format_addr_port_tuples(down_addr, local_addr, up_addr, sep=" > "))
+                interfaces = self._upstream_router.resolve(up_addr[0], up_addr[1])
                 if definitions := [f for f in self._xivalex.definitions if f.is_applicable(*up_addr)]:
                     handler = ForwardingXivHandler(
                         conn_id, self,
@@ -137,9 +139,9 @@ class ConnectionManager:
                                          self._xivalex.measure_ping,
                                          self._xivalex.extra_delay,
                                          definitions))
-                    await handler.handle(reader, writer, up_addr, self._upstream_interfaces, self._icmp_config)
+                    await handler.handle(reader, writer, up_addr, interfaces, self._icmp_config)
                 else:
-                    await handle_forwarding(conn_id, self, reader, writer, up_addr, self._upstream_interfaces,
+                    await handle_forwarding(conn_id, self, reader, writer, up_addr, interfaces,
                                             self._icmp_config)
             elif self._enable_web:
                 logging.info(f"[{conn_id:>4}] " + format_addr_port_tuples(down_addr, up_addr, sep=" > "))
