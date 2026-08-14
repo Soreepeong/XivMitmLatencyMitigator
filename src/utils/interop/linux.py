@@ -28,8 +28,11 @@ def get_all_local_addresses(devname: str = None):
 
 def clear_if_addrs(if_name: str):
     for addr, prefix in get_all_local_addresses(if_name):
-        SubprocessFailedError.call_or_raise(f"ip address delete {addr}/{prefix} dev {if_name}")
-
+        proc = subprocess.run(
+            ["ip", "address", "delete", f"{addr}/{prefix}", "dev", if_name],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if proc.returncode != 0 and "not found" not in proc.stderr:
+            raise SubprocessFailedError(proc.returncode)
 
 def setup_dummy_adapter(if_name: str, *addrs: ipaddress.IPv4Address | ipaddress.IPv6Address, clear_addrs: bool = True):
     if clear_addrs:
