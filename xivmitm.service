@@ -1,0 +1,13 @@
+[Unit]
+Description=xivmitm
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/python3 /opt/xivmitm/src/__main__.py -c /opt/xivmitm/config.json --log-format compact
+KillSignal=SIGINT
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

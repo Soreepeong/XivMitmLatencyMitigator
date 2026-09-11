@@ -20,19 +20,17 @@ from utils.interop.linux import setup_system_configuration
 from utils.interop.oodle import OodleWithBudgetAbiThunks, test_oodle
 from utils.interop.xivalex import MitigationConfig
 from utils.interop.zipatch import download_exes
+from utils.log_format import configure_logging
 from utils.misc import format_addr_port, dedup_targets, generate_nat64_targets, listener_from_address
 
 
 def __main__() -> int:
     try:
         signal.signal(signal.SIGTERM, signal.default_int_handler)
-        logging.basicConfig(level=logging.INFO, force=True,
-                            format="%(asctime)s\t%(process)d(main)\t%(levelname)s\t%(message)s",
-                            handlers=[
-                                logging.StreamHandler(sys.stderr),
-                            ])
+        configure_logging("main")
 
         args = load_arguments()
+        configure_logging("main", args.log_format)
 
         if sys.platform != 'linux':
             raise RuntimeError("This script only runs on Linux.")
@@ -72,11 +70,7 @@ def __main__() -> int:
                 logging.info("Cleaning up...")
                 subprocess.call([cleanup_filepath], shell=True)
 
-        logging.basicConfig(level=logging.INFO, force=True,
-                            format="%(asctime)s\t%(process)d(child)\t%(levelname)s\t%(message)s",
-                            handlers=[
-                                logging.StreamHandler(sys.stderr),
-                            ])
+        configure_logging("child", args.log_format)
 
         ffxiv_bytes = read_ffxiv_bytes(args)
 

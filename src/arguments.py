@@ -35,6 +35,7 @@ class ArgumentTuple:
     dns_lookup_timeout: float = 30
     serve_as: str = "nobody"
     cleanup_directory: str = "/tmp/xivmitm-cleanup"
+    log_format: str = "full"
 
     def interface_groups(self) -> dict[str, list[str]]:
         if isinstance(self.upstream_interfaces, dict):
@@ -240,6 +241,9 @@ def load_arguments() -> ArgumentTuple:
                         help="Directory to store per-process cleanup scripts. On startup, "
                              "cleanup scripts left behind by no-longer-running processes are run "
                              "and removed.")
+    parser.add_argument("--log-format", action="store",
+                        dest="log_format", default=defaults.log_format, choices=["full", "compact"],
+                        help="Log line format; realistically, whether to include timestamp, PID, and level.")
 
     parsed = vars(parser.parse_args())
     parsed.pop("config", None)

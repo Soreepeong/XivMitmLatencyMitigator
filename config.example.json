@@ -41,5 +41,6 @@
   "nat64": "none",
   "dns_lookup_timeout": 30,
   "serve_as": "nobody",
-  "cleanup_directory": "/tmp/xivmitm-cleanup"
+  "cleanup_directory": "/tmp/xivmitm-cleanup",
+  "log_format": "full"
 }
